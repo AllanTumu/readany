@@ -1,0 +1,42 @@
+[package]
+name = "readany"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+authors = ["Allan Tumuhimbise"]
+description = "Read any document into clean Markdown. Office files, PDFs, scans and photographs, through one call."
+license = "MIT"
+repository = "https://github.com/allantumu/readany"
+readme = "README.md"
+keywords = ["markdown", "document", "ocr", "pdf", "converter"]
+categories = ["text-processing", "parser-implementations"]
+include = ["/src", "/README.md", "/LICENSE"]
+
+[lib]
+name = "readany"
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+# The two engines this library routes to.
+anydoc = "0.1"
+pdf-inspector = "0.1"
+
+# The third engine, built here.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "bmp", "webp"] }
+log = "0.4"
+thiserror = "2.0"
+sha2 = "0.10"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.11"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "readany"
+path = "src/bin/readany.rs"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
