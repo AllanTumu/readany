@@ -1,0 +1,24 @@
+[package]
+name = "readany-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "WebAssembly bindings for readany: read any document into clean Markdown"
+repository = "https://github.com/AllanTumu/readany"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+readany = { path = ".." }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+
+[profile.release]
+opt-level = "z"
+lto = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

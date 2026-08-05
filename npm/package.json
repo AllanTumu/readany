@@ -1,0 +1,17 @@
+{
+  "name": "readany",
+  "version": "0.1.0",
+  "description": "Read any document into clean Markdown — Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, CSV and PDF. Tells you which pages it could not read instead of dropping them silently.",
+  "license": "MIT",
+  "author": "Allan Tumuhimbise",
+  "homepage": "https://github.com/AllanTumu/readany#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/AllanTumu/readany.git" },
+  "bugs": { "url": "https://github.com/AllanTumu/readany/issues" },
+  "keywords": ["markdown","document","pdf","docx","xlsx","pptx","epub","rtf","ocr","wasm","converter","extract","parse"],
+  "main": "readany_wasm.js",
+  "types": "readany_wasm.d.ts",
+  "files": ["readany_wasm.js","readany_wasm.d.ts","readany_wasm_bg.wasm","readany_wasm_bg.wasm.d.ts","README.md","LICENSE"],
+  "engines": { "node": ">=18" },
+  "sideEffects": ["./readany_wasm.js"],
+  "publishConfig": { "access": "public" }
+}

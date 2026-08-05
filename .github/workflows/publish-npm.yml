@@ -1,0 +1,27 @@
+name: Publish to npm
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-unknown-unknown }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, registry-url: "https://registry.npmjs.org" }
+      - run: cargo install wasm-pack --locked
+      - run: wasm-pack build wasm --target nodejs --release --out-dir ../pkg
+      - name: Restore package metadata
+        run: |
+          cp npm/package.json pkg/package.json
+          cp npm/README.md pkg/README.md
+          cp LICENSE pkg/LICENSE
+      - run: npm publish --access public
+        working-directory: pkg
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
