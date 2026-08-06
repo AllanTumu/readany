@@ -93,6 +93,12 @@ pub struct ScanResult {
     /// Skew corrected before recognition, in degrees.
     pub skew: f32,
     pub processing_time_ms: u64,
+    /// Straightening the page: decode, orientation, deskew.
+    pub prepare_ms: u64,
+    /// Finding where the text is. One pass over the whole page.
+    pub detect_ms: u64,
+    /// Reading the text. One call per box, or one per batch.
+    pub recognize_ms: u64,
 }
 
 impl ScanResult {

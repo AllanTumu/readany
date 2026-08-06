@@ -114,15 +114,30 @@ impl<D: Detector, R: Recognizer> Engine<D, R> {
     /// Read a page: straighten, detect, recognise, order.
     pub fn scan_bytes(&self, bytes: &[u8]) -> Result<ScanResult> {
         let watch = crate::clock::Stopwatch::start();
+        let stage = crate::clock::Stopwatch::start();
         let prepared = prepare_bytes(bytes, &self.options)?;
         let (width, height) = prepared.image.dimensions();
+        let prepare_ms = stage.elapsed_ms();
 
+        let stage = crate::clock::Stopwatch::start();
         let quads = self.detector.detect(&prepared.image)?;
-        let mut boxes = Vec::with_capacity(quads.len());
+        let detect_ms = stage.elapsed_ms();
 
-        for quad in quads {
-            let crop = crop_corrected(&prepared, &quad);
-            let (text, confidence) = self.recognizer.recognize(&crop)?;
+        // Crop everything first, then hand the whole set to the recogniser in
+        // one call. A backend that batches pays the cost of entering the
+        // inference runtime once instead of once per box, which on a phone is
+        // most of the time spent. Backends that do not batch get the same
+        // answer from the looping default on the trait.
+        let crops: Vec<GrayImage> = quads
+            .iter()
+            .map(|quad| crop_corrected(&prepared, quad))
+            .collect();
+        let stage = crate::clock::Stopwatch::start();
+        let read = self.recognizer.recognize_batch(&crops)?;
+        let recognize_ms = stage.elapsed_ms();
+
+        let mut boxes = Vec::with_capacity(quads.len());
+        for (quad, (text, confidence)) in quads.into_iter().zip(read) {
             if text.trim().is_empty() {
                 continue;
             }
@@ -142,6 +157,9 @@ impl<D: Detector, R: Recognizer> Engine<D, R> {
             rotation: prepared.rotation,
             skew: prepared.skew,
             processing_time_ms: watch.elapsed_ms(),
+            prepare_ms,
+            detect_ms,
+            recognize_ms,
         })
     }
 
