@@ -10,6 +10,13 @@ use std::path::Path;
 /// How to run the pipeline.
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
+    /// Even out the lighting before detection.
+    ///
+    /// A creased receipt has a fold shadow, and characters that fall in it are
+    /// lost — not because they are unreadable but because the region growing
+    /// never reaches them. Measured on a real receipt, this cost the first
+    /// characters of four separate lines.
+    pub flatten_lighting: bool,
     /// Find the document inside the photograph and read only that.
     ///
     /// A phone photograph of a receipt is mostly table, and the detector
@@ -40,6 +47,7 @@ pub struct ScanOptions {
 impl Default for ScanOptions {
     fn default() -> Self {
         ScanOptions {
+            flatten_lighting: true,
             crop_to_content: true,
             fix_orientation: true,
             fix_skew: true,
@@ -82,12 +90,21 @@ pub fn prepare_bytes(bytes: &[u8], options: &ScanOptions) -> Result<Prepared> {
         None => (whole, (0, 0)),
     };
 
+    // Flattening is for the detector's benefit only. The recogniser still gets
+    // its crops from the untouched original, because every extra resample of a
+    // glyph costs accuracy.
+    let evened = if options.flatten_lighting {
+        super::image::flatten::flatten(&decoded)
+    } else {
+        decoded.clone()
+    };
+
     let orientation = if options.fix_orientation {
-        super::image::orient::detect(&decoded)
+        super::image::orient::detect(&evened)
     } else {
         super::image::orient::Orientation::Upright
     };
-    let turned = super::image::orient::apply(&decoded, orientation);
+    let turned = super::image::orient::apply(&evened, orientation);
     let rotation = orientation.degrees();
 
     let turned_dims = turned.dimensions();
