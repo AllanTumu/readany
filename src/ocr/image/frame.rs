@@ -1,0 +1,252 @@
+//! Finding the document inside a photograph.
+//!
+//! A phone photograph of a receipt is mostly table. The detector shrinks the
+//! whole frame to its working size, so the receipt — and every glyph on it —
+//! shrinks with it. Measured on real photographs: reading the full frame finds
+//! a fraction of the text that reading a cropped receipt does.
+//!
+//! Edge detection is the obvious approach and it is the wrong one here. A white
+//! receipt on a pale table has almost no edge to find, and the three real
+//! receipts that started this work were all white on white.
+//!
+//! So this keys on **texture** instead. Print produces sharp variation over a
+//! few pixels. Tables, shadows and paper do not: a shadow is a smooth gradient,
+//! and smooth means low contrast inside a small window however dark it gets.
+//! Measuring contrast in an 8-pixel cell therefore finds ink and ignores both
+//! the background and the lighting.
+
+use super::GrayImage;
+
+/// Long side of the small copy this works on. The whole point is that this is
+/// cheap, and ink is just as findable at 800 pixels as at 4000.
+const WORK_SIDE: u32 = 800;
+/// Cell side, in pixels of the small copy.
+const CELL: u32 = 8;
+/// Light-to-dark range inside one cell before we call it ink.
+const INK_CONTRAST: u8 = 40;
+/// Cells to grow the mask by before grouping, so the blank gaps between lines
+/// of text do not split one receipt into thirty separate findings.
+const BRIDGE: i32 = 2;
+/// Padding added to the result, as a fraction of the long side.
+const MARGIN: f32 = 0.02;
+/// Below this share of the frame the finding is noise, not a document.
+const MIN_AREA: f32 = 0.02;
+/// Above this share there is nothing to crop and we should not pretend.
+const MAX_AREA: f32 = 0.92;
+
+/// Where the document is, as `(x, y, width, height)` in the image's own
+/// pixels. `None` means nothing document-shaped was found and the caller
+/// should use the whole frame rather than guess.
+pub fn content_bounds(img: &GrayImage) -> Option<(u32, u32, u32, u32)> {
+    let (w, h) = img.dimensions();
+    if w < CELL * 4 || h < CELL * 4 {
+        return None;
+    }
+
+    // Work small. A 12 megapixel photograph becomes about half a megapixel.
+    let scale = (WORK_SIDE as f32 / w.max(h) as f32).min(1.0);
+    let sw = ((w as f32 * scale) as u32).max(CELL * 4);
+    let sh = ((h as f32 * scale) as u32).max(CELL * 4);
+    let small = image::imageops::resize(img, sw, sh, image::imageops::FilterType::Triangle);
+
+    let (cols, rows) = (sw / CELL, sh / CELL);
+    if cols < 4 || rows < 4 {
+        return None;
+    }
+
+    // One pass: does this cell contain ink?
+    let mut ink = vec![false; (cols * rows) as usize];
+    for cy in 0..rows {
+        for cx in 0..cols {
+            let (mut lo, mut hi) = (255u8, 0u8);
+            for y in cy * CELL..(cy + 1) * CELL {
+                for x in cx * CELL..(cx + 1) * CELL {
+                    let v = small.get_pixel(x, y).0[0];
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+            ink[(cy * cols + cx) as usize] = hi.saturating_sub(lo) >= INK_CONTRAST;
+        }
+    }
+
+    // Grow, so one receipt is one region rather than one region per line.
+    let mut grown = vec![false; ink.len()];
+    for cy in 0..rows as i32 {
+        for cx in 0..cols as i32 {
+            'cell: for dy in -BRIDGE..=BRIDGE {
+                for dx in -BRIDGE..=BRIDGE {
+                    let (nx, ny) = (cx + dx, cy + dy);
+                    if nx >= 0
+                        && ny >= 0
+                        && nx < cols as i32
+                        && ny < rows as i32
+                        && ink[(ny * cols as i32 + nx) as usize]
+                    {
+                        grown[(cy * cols as i32 + cx) as usize] = true;
+                        break 'cell;
+                    }
+                }
+            }
+        }
+    }
+
+    // The biggest group of grown cells is the document. A second receipt in
+    // the frame, or a dark object at the edge, becomes a smaller group and is
+    // ignored — which is the behaviour we want until page splitting exists.
+    let best = largest_group(&grown, cols, rows)?;
+
+    // Measure the box from the real ink inside that group, not the grown mask,
+    // so the padding stays honest.
+    let (mut x0, mut y0, mut x1, mut y1) = (cols, rows, 0u32, 0u32);
+    let mut count = 0u32;
+    for cy in 0..rows {
+        for cx in 0..cols {
+            let i = (cy * cols + cx) as usize;
+            if best[i] && ink[i] {
+                x0 = x0.min(cx);
+                y0 = y0.min(cy);
+                x1 = x1.max(cx);
+                y1 = y1.max(cy);
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+
+    // Back to the caller's pixels, with a margin.
+    let inv = 1.0 / scale;
+    let pad = (w.max(h) as f32 * MARGIN).round();
+    let fx0 = ((x0 * CELL) as f32 * inv - pad).max(0.0);
+    let fy0 = ((y0 * CELL) as f32 * inv - pad).max(0.0);
+    let fx1 = (((x1 + 1) * CELL) as f32 * inv + pad).min(w as f32);
+    let fy1 = (((y1 + 1) * CELL) as f32 * inv + pad).min(h as f32);
+
+    let (bw, bh) = ((fx1 - fx0) as u32, (fy1 - fy0) as u32);
+    if bw == 0 || bh == 0 {
+        return None;
+    }
+
+    let share = (bw as f32 * bh as f32) / (w as f32 * h as f32);
+    if !(MIN_AREA..=MAX_AREA).contains(&share) {
+        return None;
+    }
+    Some((fx0 as u32, fy0 as u32, bw, bh))
+}
+
+/// Flood fill, four-connected, returning the largest group as a mask.
+fn largest_group(mask: &[bool], cols: u32, rows: u32) -> Option<Vec<bool>> {
+    let mut seen = vec![false; mask.len()];
+    let mut best: Option<(usize, Vec<bool>)> = None;
+    let mut stack: Vec<u32> = Vec::new();
+
+    for start in 0..mask.len() {
+        if seen[start] || !mask[start] {
+            continue;
+        }
+        let mut group = vec![false; mask.len()];
+        let mut size = 0usize;
+        seen[start] = true;
+        stack.push(start as u32);
+
+        while let Some(i) = stack.pop() {
+            group[i as usize] = true;
+            size += 1;
+            let (x, y) = (i % cols, i / cols);
+            let push = |j: u32, seen: &mut Vec<bool>, stack: &mut Vec<u32>| {
+                if !seen[j as usize] && mask[j as usize] {
+                    seen[j as usize] = true;
+                    stack.push(j);
+                }
+            };
+            if x > 0 {
+                push(i - 1, &mut seen, &mut stack);
+            }
+            if x + 1 < cols {
+                push(i + 1, &mut seen, &mut stack);
+            }
+            if y > 0 {
+                push(i - cols, &mut seen, &mut stack);
+            }
+            if y + 1 < rows {
+                push(i + cols, &mut seen, &mut stack);
+            }
+        }
+        if best.as_ref().is_none_or(|(n, _)| size > *n) {
+            best = Some((size, group));
+        }
+    }
+    best.map(|(_, g)| g)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Paint a block that looks like print: dark bands the height of a line
+    /// of text, separated by paper. Single-pixel checkerboard would be wrong —
+    /// it averages away the moment the image is scaled down, and real text
+    /// does not.
+    fn textured(img: &mut GrayImage, x0: u32, y0: u32, x1: u32, y1: u32) {
+        for y in y0..y1 {
+            let on_a_line = (y - y0) % 24 < 10;
+            for x in x0..x1 {
+                let v = if on_a_line && (x - x0) % 14 < 9 { 20 } else { 240 };
+                img.put_pixel(x, y, image::Luma([v]));
+            }
+        }
+    }
+
+    #[test]
+    fn a_document_in_a_large_frame_is_found() {
+        let mut img = GrayImage::from_pixel(1200, 1600, image::Luma([245u8]));
+        textured(&mut img, 400, 300, 800, 1300);
+        let (x, y, w, h) = content_bounds(&img).expect("should find the document");
+        // Within the margin we deliberately add.
+        assert!(x < 400 && y < 300, "box starts before the ink: {x},{y}");
+        assert!(x + w > 800 && y + h > 1300, "box ends after the ink");
+        assert!(w < 700 && h < 1300, "box should still be much smaller than the frame");
+    }
+
+    #[test]
+    fn a_blank_frame_finds_nothing() {
+        let img = GrayImage::from_pixel(1200, 1600, image::Luma([245u8]));
+        assert_eq!(content_bounds(&img), None);
+    }
+
+    /// A shadow is a smooth gradient. Dark is not the same as inky, and a
+    /// photograph of a receipt on a table nearly always has one.
+    #[test]
+    fn a_shadow_is_not_mistaken_for_a_document() {
+        let mut img = GrayImage::from_pixel(1200, 1600, image::Luma([245u8]));
+        for y in 0..1600u32 {
+            for x in 0..600u32 {
+                img.put_pixel(x, y, image::Luma([(120 + x / 10) as u8]));
+            }
+        }
+        textured(&mut img, 700, 400, 1000, 1200);
+        let (x, _, w, _) = content_bounds(&img).expect("should find the document");
+        assert!(x > 600, "the shadow was included, box starts at {x}");
+        assert!(w < 500, "box is too wide, {w}");
+    }
+
+    /// Two receipts in one frame: take the bigger one rather than a box that
+    /// spans both and is mostly table.
+    #[test]
+    fn the_larger_of_two_documents_wins() {
+        let mut img = GrayImage::from_pixel(1600, 1600, image::Luma([245u8]));
+        textured(&mut img, 100, 100, 250, 250); // small
+        textured(&mut img, 700, 500, 1400, 1400); // large
+        let (x, y, _, _) = content_bounds(&img).expect("should find a document");
+        assert!(x > 400 && y > 300, "picked the small one: {x},{y}");
+    }
+
+    #[test]
+    fn a_frame_that_is_all_document_is_left_alone() {
+        let mut img = GrayImage::from_pixel(1000, 1000, image::Luma([245u8]));
+        textured(&mut img, 5, 5, 995, 995);
+        assert_eq!(content_bounds(&img), None, "nothing worth cropping");
+    }
+}

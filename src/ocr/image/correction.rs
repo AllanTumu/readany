@@ -21,6 +21,13 @@ pub struct Correction {
     pub original: (u32, u32),
     /// Size after the quarter turn, which is also the straightened size.
     pub turned: (u32, u32),
+    /// Where the document was found in the photograph it was cut from.
+    ///
+    /// [`to_original`](Self::to_original) returns coordinates on the cut-out,
+    /// because that is what sampling a crop needs. Add this to get back to the
+    /// photograph the user actually took, which is what a "show me where this
+    /// number came from" feature needs.
+    pub crop_origin: (u32, u32),
 }
 
 impl Correction {
@@ -30,12 +37,20 @@ impl Correction {
             skew: 0.0,
             original: (width, height),
             turned: (width, height),
+            crop_origin: (0, 0),
         }
     }
 
     /// True when nothing was changed, so crops can be taken directly.
     pub fn is_identity(&self) -> bool {
         self.orientation == Orientation::Upright && self.skew.abs() < 0.01
+    }
+
+    /// Map a point on the straightened page back to the photograph the user
+    /// took, including the crop that found the document inside it.
+    pub fn to_frame(&self, x: f32, y: f32) -> (f32, f32) {
+        let (ox, oy) = self.to_original(x, y);
+        (ox + self.crop_origin.0 as f32, oy + self.crop_origin.1 as f32)
     }
 
     /// Map a point on the straightened page back to the original image.
@@ -93,6 +108,7 @@ mod tests {
             skew: 0.0,
             original: (100, 50),
             turned: (50, 100),
+            crop_origin: (0, 0),
         };
         // Original top-left (0,0) landed at turned (h-1-0, 0) = (49, 0).
         let (x, y) = c.to_original(49.0, 0.0);
@@ -112,6 +128,7 @@ mod tests {
             skew,
             original: (101, 101),
             turned: (101, 101),
+            crop_origin: (0, 0),
         };
 
         // Find where the dark pixel ended up, then map it back.
@@ -142,6 +159,7 @@ mod tests {
             skew: 0.0,
             original: (100, 50),
             turned: (100, 50),
+            crop_origin: (0, 0),
         };
         let (x, y) = c.to_original(0.0, 0.0);
         assert!(

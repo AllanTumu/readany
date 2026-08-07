@@ -6,6 +6,7 @@ pub mod binarize;
 pub mod correction;
 pub mod decode;
 pub mod deskew;
+pub mod frame;
 pub mod orient;
 
 pub use correction::Correction;

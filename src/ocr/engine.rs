@@ -10,6 +10,13 @@ use std::path::Path;
 /// How to run the pipeline.
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
+    /// Find the document inside the photograph and read only that.
+    ///
+    /// A phone photograph of a receipt is mostly table, and the detector
+    /// shrinks whatever it is given to a fixed working size, so every glyph
+    /// shrinks with the table. Cutting the document out first is worth more
+    /// than any other single change measured on real photographs.
+    pub crop_to_content: bool,
     /// Correct page rotation of 90, 180 or 270 degrees.
     pub fix_orientation: bool,
     /// Correct small skew introduced by scanners and phone cameras.
@@ -33,6 +40,7 @@ pub struct ScanOptions {
 impl Default for ScanOptions {
     fn default() -> Self {
         ScanOptions {
+            crop_to_content: true,
             fix_orientation: true,
             fix_skew: true,
             confidence_floor: 0.5,
@@ -58,7 +66,21 @@ pub struct Prepared {
 /// Decode a page and straighten it. This needs no model and no network,
 /// so it works today and is useful on its own.
 pub fn prepare_bytes(bytes: &[u8], options: &ScanOptions) -> Result<Prepared> {
-    let decoded = super::image::decode_bytes(bytes)?;
+    let whole = super::image::decode_bytes(bytes)?;
+
+    // Cut the document out of the photograph before anything else. Everything
+    // downstream then works on paper rather than on a table.
+    let (decoded, crop_origin) = match options
+        .crop_to_content
+        .then(|| super::image::frame::content_bounds(&whole))
+        .flatten()
+    {
+        Some((x, y, w, h)) => (
+            image::imageops::crop_imm(&whole, x, y, w, h).to_image(),
+            (x, y),
+        ),
+        None => (whole, (0, 0)),
+    };
 
     let orientation = if options.fix_orientation {
         super::image::orient::detect(&decoded)
@@ -81,6 +103,7 @@ pub fn prepare_bytes(bytes: &[u8], options: &ScanOptions) -> Result<Prepared> {
         skew,
         original: decoded.dimensions(),
         turned: turned_dims,
+        crop_origin,
     };
 
     Ok(Prepared {
@@ -288,6 +311,17 @@ fn crop_quad(img: &GrayImage, quad: &Quad) -> GrayImage {
 
 #[cfg(test)]
 mod tests {
+
+    /// These tests are about orientation and skew, so they hand the pipeline a
+    /// small synthetic page and expect its coordinates back unchanged. Finding
+    /// a document inside a photograph is a different job with its own tests in
+    /// `image::frame`, and it would cut these pages before they were measured.
+    fn geometry_only() -> ScanOptions {
+        ScanOptions {
+            crop_to_content: false,
+            ..Default::default()
+        }
+    }
     use super::*;
     use crate::ocr::detect::Detector;
     use crate::ocr::error::ScanError;
@@ -330,7 +364,7 @@ mod tests {
 
     #[test]
     fn prepare_decodes_and_reports_corrections() {
-        let prepared = prepare_bytes(&png_page(), &ScanOptions::default()).unwrap();
+        let prepared = prepare_bytes(&png_page(), &geometry_only()).unwrap();
         assert_eq!(prepared.image.dimensions(), (200, 120));
         assert!(prepared.skew.abs() < 2.0);
     }
@@ -353,7 +387,8 @@ mod tests {
                 Quad::from_rect(10.0, 20.0, 180.0, 10.0),
             ]),
             FakeRecognizer,
-        );
+        )
+        .with_options(geometry_only());
         let result = engine.scan_bytes(&png_page()).unwrap();
         // Two boxes on different rows become two lines, top one first.
         assert_eq!(result.lines.len(), 2);
@@ -367,7 +402,7 @@ mod tests {
     fn crops_come_from_the_original_when_the_page_was_straightened() {
         // A tilted page: the correction is not identity, so the crop path
         // must sample the original rather than the resampled copy.
-        let prepared = prepare_bytes(&png_page(), &ScanOptions::default()).unwrap();
+        let prepared = prepare_bytes(&png_page(), &geometry_only()).unwrap();
         assert_eq!(prepared.original.dimensions(), (200, 120));
         // Whatever the measured skew, mapping the centre back must land
         // inside the original image.
