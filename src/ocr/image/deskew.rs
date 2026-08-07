@@ -11,6 +11,8 @@ use super::GrayImage;
 const SEARCH_DEGREES: f32 = 15.0;
 const COARSE_STEP: f32 = 1.0;
 const FINE_STEP: f32 = 0.1;
+/// How much sharper the straightened projection must be before we rotate.
+const MIN_PEAK_GAIN: f64 = 1.05;
 
 /// Estimate the page skew in degrees. Positive means the page is rotated
 /// clockwise and must be rotated back by that amount.
@@ -21,18 +23,43 @@ pub fn estimate_skew(img: &GrayImage) -> f32 {
     }
     let mask = ink_mask(img);
 
-    let coarse = best_angle(&mask, w, h, -SEARCH_DEGREES, SEARCH_DEGREES, COARSE_STEP);
-    best_angle(
+    let (coarse, coarse_score) =
+        best_angle(&mask, w, h, -SEARCH_DEGREES, SEARCH_DEGREES, COARSE_STEP);
+
+    // A best angle sitting on the edge of the search is not an answer, it is
+    // the search running out of room. It happens on creased and curved paper,
+    // where the ink projection has no clear peak, and acting on it rotates a
+    // perfectly readable page into nonsense.
+    //
+    // Measured on a creased receipt: the estimate saturated at 15.9 degrees
+    // against a true tilt of about 3, and correcting it took field extraction
+    // from 6 of 8 down to 2 of 8. Returning zero here is not giving up; it is
+    // declining to make the page worse.
+    if coarse.abs() >= SEARCH_DEGREES - COARSE_STEP / 2.0 {
+        return 0.0;
+    }
+
+    // The peak must also be a real peak. If straightening barely beats leaving
+    // the page alone, leave it alone.
+    let flat_score = projection_variance(&mask, w, h, 0.0);
+    if coarse_score < flat_score * MIN_PEAK_GAIN {
+        return 0.0;
+    }
+
+    let (fine, _) = best_angle(
         &mask,
         w,
         h,
         coarse - COARSE_STEP,
         coarse + COARSE_STEP,
         FINE_STEP,
-    )
+    );
+    fine
 }
 
-fn best_angle(mask: &[bool], w: u32, h: u32, from: f32, to: f32, step: f32) -> f32 {
+/// Returns the best angle and its score, so the caller can judge whether the
+/// peak is worth acting on.
+fn best_angle(mask: &[bool], w: u32, h: u32, from: f32, to: f32, step: f32) -> (f32, f64) {
     let mut best = 0.0f32;
     let mut best_score = f64::MIN;
     let mut angle = from;
@@ -44,7 +71,7 @@ fn best_angle(mask: &[bool], w: u32, h: u32, from: f32, to: f32, step: f32) -> f
         }
         angle += step;
     }
-    best
+    (best, best_score)
 }
 
 /// Variance of the row-wise ink counts after a shear of `angle` degrees.
@@ -159,5 +186,33 @@ mod tests {
         let img = ruled_page();
         let out = rotate(&img, 7.0);
         assert_eq!(img.dimensions(), out.dimensions());
+    }
+
+    /// A page with no clear text lines — creased paper, a photograph of a
+    /// crumpled receipt — used to drive the search to its boundary and rotate
+    /// the page by 15.9 degrees, which destroyed text that was readable.
+    #[test]
+    fn a_saturated_estimate_is_refused() {
+        // Diagonal ink with no horizontal structure: every angle scores about
+        // the same, so the search has no peak to find.
+        let mut img = GrayImage::from_pixel(200, 200, image::Luma([255u8]));
+        for i in 0..200u32 {
+            img.put_pixel(i, i, image::Luma([0]));
+            if i + 1 < 200 {
+                img.put_pixel(i + 1, i, image::Luma([0]));
+            }
+        }
+        let skew = estimate_skew(&img);
+        assert!(
+            skew.abs() < SEARCH_DEGREES - COARSE_STEP,
+            "an estimate at the edge of the search must be refused, got {skew}"
+        );
+    }
+
+    /// Blank paper has nothing to straighten and must not be rotated.
+    #[test]
+    fn a_blank_page_is_left_alone() {
+        let img = GrayImage::from_pixel(200, 200, image::Luma([255u8]));
+        assert_eq!(estimate_skew(&img), 0.0);
     }
 }

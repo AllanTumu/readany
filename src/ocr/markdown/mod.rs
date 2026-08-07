@@ -137,6 +137,9 @@ mod tests {
             rotation: 0,
             skew: 0.0,
             processing_time_ms: 1,
+            prepare_ms: 0,
+            detect_ms: 0,
+            recognize_ms: 1,
         }
     }
 
