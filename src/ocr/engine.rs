@@ -16,6 +16,18 @@ pub struct ScanOptions {
     pub fix_skew: bool,
     /// Below this mean confidence, [`ScanResult::needs_review`] returns true.
     pub confidence_floor: f32,
+    /// When a page comes back below `confidence_floor`, read it again with the
+    /// geometric corrections turned off and keep whichever attempt read best.
+    ///
+    /// The corrections are the usual cause of a bad read. Measured across seven
+    /// photographed receipts, orientation was wrongly detected as 90 degrees on
+    /// two of them; confidence collapsed to 0.198 and 0.219 and the text was
+    /// nonsense. Reading those two again upright gave 0.960 and 0.925, and one
+    /// went from 0 of 10 fields to 10 of 10.
+    ///
+    /// This costs a second pass only on the pages that failed, which on that
+    /// set was two of seven.
+    pub retry_when_unsure: bool,
 }
 
 impl Default for ScanOptions {
@@ -24,6 +36,7 @@ impl Default for ScanOptions {
             fix_orientation: true,
             fix_skew: true,
             confidence_floor: 0.5,
+            retry_when_unsure: true,
         }
     }
 }
@@ -112,10 +125,44 @@ impl<D: Detector, R: Recognizer> Engine<D, R> {
     }
 
     /// Read a page: straighten, detect, recognise, order.
+    ///
+    /// If the first attempt comes back unsure and `retry_when_unsure` is set,
+    /// the page is read again without the geometric corrections and the better
+    /// attempt is returned. A wrongly detected rotation is the commonest way a
+    /// perfectly readable page turns into nonsense, and the engine can tell
+    /// that it happened, so it should not hand the nonsense back.
     pub fn scan_bytes(&self, bytes: &[u8]) -> Result<ScanResult> {
+        let mut best = self.scan_once(bytes, &self.options)?;
+        if !self.options.retry_when_unsure || best.confidence() >= self.options.confidence_floor {
+            return Ok(best);
+        }
+
+        for attempt in [
+            ScanOptions {
+                fix_orientation: false,
+                ..self.options.clone()
+            },
+            ScanOptions {
+                fix_orientation: false,
+                fix_skew: false,
+                ..self.options.clone()
+            },
+        ] {
+            let again = self.scan_once(bytes, &attempt)?;
+            if again.confidence() > best.confidence() {
+                best = again;
+            }
+            if best.confidence() >= self.options.confidence_floor {
+                break;
+            }
+        }
+        Ok(best)
+    }
+
+    fn scan_once(&self, bytes: &[u8], options: &ScanOptions) -> Result<ScanResult> {
         let watch = crate::clock::Stopwatch::start();
         let stage = crate::clock::Stopwatch::start();
-        let prepared = prepare_bytes(bytes, &self.options)?;
+        let prepared = prepare_bytes(bytes, options)?;
         let (width, height) = prepared.image.dimensions();
         let prepare_ms = stage.elapsed_ms();
 
