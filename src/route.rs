@@ -110,7 +110,64 @@ fn classify(bytes: &[u8]) -> Result<Route> {
         return Ok(Route::Image);
     }
 
+    // Delimited text has no signature to sniff. `anydoc::Format::from_bytes`
+    // reads magic bytes, and a CSV has none, so a spreadsheet export — the
+    // commonest file a bookkeeper will ever hand us — was being reported as
+    // unrecognised while the documentation promised we read it.
+    if let Some(format) = sniff_delimited(bytes) {
+        return Ok(Route::Office(format));
+    }
+
     Ok(Route::Unknown)
+}
+
+/// Rows of a table, separated by something, quoted the way spreadsheets quote.
+///
+/// The test is consistency rather than any one character: real delimited text
+/// has the same number of separators on nearly every line, and prose does not.
+/// Counting outside quotes matters — a single cell of embedded JSON can hold
+/// more commas than the whole rest of the row.
+fn sniff_delimited(bytes: &[u8]) -> Option<anydoc::Format> {
+    const LOOK_AT: usize = 12;
+    const NEEDED: usize = 3;
+
+    let text = std::str::from_utf8(bytes).ok()?;
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(LOOK_AT)
+        .collect();
+    if lines.len() < NEEDED {
+        return None;
+    }
+
+    for delimiter in [b',', b';', b'\t', b'|'] {
+        let counts: Vec<usize> = lines.iter().map(|l| count_outside_quotes(l, delimiter)).collect();
+        let first = counts[0];
+        if first == 0 {
+            continue;
+        }
+        let agreeing = counts.iter().filter(|&&c| c == first).count();
+        // Every line but one must agree. A ragged file is prose that happens
+        // to contain commas, and guessing at it would be worse than saying no.
+        if agreeing + 1 >= counts.len() {
+            return Some(anydoc::Format::Csv);
+        }
+    }
+    None
+}
+
+fn count_outside_quotes(line: &str, delimiter: u8) -> usize {
+    let mut inside = false;
+    let mut count = 0;
+    for b in line.bytes() {
+        match b {
+            b'"' => inside = !inside,
+            d if d == delimiter && !inside => count += 1,
+            _ => {}
+        }
+    }
+    count
 }
 
 fn inspect_pdf(bytes: &[u8]) -> Result<PdfPlan> {
@@ -188,5 +245,46 @@ mod tests {
             "took {}ms",
             plan.inspect_time_ms
         );
+    }
+}
+
+#[cfg(test)]
+mod delimited_tests {
+    use super::*;
+
+    #[test]
+    fn a_spreadsheet_export_is_recognised() {
+        let csv = "Date,Amount,Balance\n2026-08-08,200.00,6332575.17\n2026-08-08,400.00,6332175.17\n2026-08-08,600.00,6331575.17\n";
+        assert!(matches!(classify(csv.as_bytes()), Ok(Route::Office(_))));
+    }
+
+    /// A cell of embedded JSON holds more commas than the rest of the row.
+    /// Counting them would make every line disagree and the file would be
+    /// refused — which is exactly what happened to a real mobile-money export.
+    #[test]
+    fn commas_inside_a_quoted_cell_do_not_count() {
+        let csv = "id,amount,meta\n1,200.00,\"{\"\"a\"\":1,\"\"b\"\":2,\"\"c\"\":3}\"\n2,400.00,\"{\"\"a\"\":4,\"\"b\"\":5,\"\"c\"\":6}\"\n3,600.00,\"{\"\"a\"\":7,\"\"b\"\":8,\"\"c\"\":9}\"\n";
+        assert!(matches!(classify(csv.as_bytes()), Ok(Route::Office(_))));
+    }
+
+    #[test]
+    fn semicolons_and_tabs_count_too() {
+        let semi = "a;b;c\n1;2;3\n4;5;6\n";
+        assert!(matches!(classify(semi.as_bytes()), Ok(Route::Office(_))));
+        let tab = "a\tb\tc\n1\t2\t3\n4\t5\t6\n";
+        assert!(matches!(classify(tab.as_bytes()), Ok(Route::Office(_))));
+    }
+
+    /// Prose with commas in it is not a table, and guessing would be worse
+    /// than admitting we do not know what the file is.
+    #[test]
+    fn prose_is_not_mistaken_for_a_table() {
+        let prose = "Dear Sir, I write regarding the matter.\nIt is, as you know, complicated.\nYours faithfully, Allan\nPost scriptum.\n";
+        assert!(matches!(classify(prose.as_bytes()), Ok(Route::Unknown)));
+    }
+
+    #[test]
+    fn two_lines_are_not_enough_to_be_sure() {
+        assert!(matches!(classify(b"a,b,c\n1,2,3\n"), Ok(Route::Unknown)));
     }
 }
