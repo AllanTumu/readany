@@ -33,7 +33,7 @@ pub mod route;
 
 pub use error::{ReadError, Result};
 pub use ocr::OcrBackend;
-pub use route::{inspect, PdfKind, PdfPlan, Plan, Route};
+pub use route::{inspect, inspect_named, PdfKind, PdfPlan, Plan, Route};
 
 use std::path::Path;
 
@@ -104,6 +104,14 @@ impl Document {
 /// How to read.
 #[derive(Default)]
 pub struct Options<'a> {
+    /// The file's name, when the caller knows it.
+    ///
+    /// Formats are recognised from their bytes wherever possible, because a
+    /// name can lie. But some formats have no signature to read: a CSV of one
+    /// column is a list of lines, indistinguishable from prose without being
+    /// told. When sniffing cannot decide, the extension is consulted rather
+    /// than refusing a file we can plainly read.
+    pub filename: Option<&'a str>,
     /// Supply an OCR engine to read image-only pages. Without one, such pages
     /// are reported in `unresolved_pages` instead of being read.
     pub ocr: Option<&'a dyn OcrBackend>,
@@ -132,7 +140,7 @@ pub fn to_markdown(bytes: &[u8]) -> Result<String> {
 /// Read a file, choosing the engine from its content.
 pub fn read_with(bytes: &[u8], options: &Options) -> Result<Document> {
     let watch = clock::Stopwatch::start();
-    let plan = inspect(bytes)?;
+    let plan = route::inspect_named(bytes, options.filename)?;
 
     let mut pages: Vec<Page> = Vec::new();
 
@@ -191,17 +199,16 @@ pub fn read_with(bytes: &[u8], options: &Options) -> Result<Document> {
 /// The core of the library: read a PDF page by page, extracting where the text
 /// exists and recognising only where it does not.
 fn read_pdf_pages(bytes: &[u8], plan: &PdfPlan, _options: &Options) -> Result<Vec<Page>> {
-    // A PDF with text on every page needs no per-page work.
-    if plan.kind == PdfKind::Text {
-        let result = pdf_inspector::process_pdf_mem(bytes)?;
-        return Ok(vec![Page {
-            number: 1,
-            markdown: result.markdown.unwrap_or_default(),
-            origin: Origin::Text,
-            confidence: None,
-        }]);
-    }
-
+    // Every PDF is read page by page, including one whose pages all carry
+    // text.
+    //
+    // There used to be a shortcut here: a fully-textual PDF was read in one
+    // call and returned as a single page numbered 1, however long it was. A
+    // six-page bank statement reported "1 page". That is wrong twice over — a
+    // caller cannot cite a page, and `unresolved_pages` cannot name one — and
+    // page numbers are the whole basis of showing a person where a figure came
+    // from.
+    let _ = plan;
     let extracted = pdf_inspector::extract_pages_markdown_mem(bytes, None)?;
     let mut pages = Vec::with_capacity(extracted.pages.len());
 

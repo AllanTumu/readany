@@ -76,8 +76,13 @@ impl Plan {
 
 /// Work out how a file would be read, without reading it.
 pub fn inspect(bytes: &[u8]) -> Result<Plan> {
+    inspect_named(bytes, None)
+}
+
+/// Work out what a file is, given its name as well as its bytes.
+pub fn inspect_named(bytes: &[u8], name: Option<&str>) -> Result<Plan> {
     let watch = crate::clock::Stopwatch::start();
-    let route = classify(bytes)?;
+    let route = classify_with_name(bytes, name)?;
     let (needs_ocr, ocr_page_count) = match &route {
         Route::Office(_) => (false, 0),
         Route::Pdf(p) => (!p.pages_needing_ocr.is_empty(), p.pages_needing_ocr.len()),
@@ -92,7 +97,7 @@ pub fn inspect(bytes: &[u8]) -> Result<Plan> {
     })
 }
 
-fn classify(bytes: &[u8]) -> Result<Route> {
+fn classify_with_name(bytes: &[u8], name: Option<&str>) -> Result<Route> {
     if bytes.is_empty() {
         return Err(ReadError::Unsupported("the file is empty".into()));
     }
@@ -118,7 +123,26 @@ fn classify(bytes: &[u8]) -> Result<Route> {
         return Ok(Route::Office(format));
     }
 
+    // Last resort, and only for text we can actually decode. A name is weaker
+    // evidence than a signature, so it is asked last and never allowed to
+    // override what the bytes said.
+    if let Some(format) = name
+        .and_then(|n| n.rsplit('.').next())
+        .and_then(anydoc::Format::from_extension)
+    {
+        if format != anydoc::Format::Pdf && std::str::from_utf8(bytes).is_ok() {
+            return Ok(Route::Office(format));
+        }
+    }
+
     Ok(Route::Unknown)
+}
+
+/// Classify from bytes alone. Used by the tests, which is the point: the
+/// bytes must be enough on their own for every format that has a signature.
+#[cfg(test)]
+fn classify(bytes: &[u8]) -> Result<Route> {
+    classify_with_name(bytes, None)
 }
 
 /// Rows of a table, separated by something, quoted the way spreadsheets quote.
@@ -286,5 +310,43 @@ mod delimited_tests {
     #[test]
     fn two_lines_are_not_enough_to_be_sure() {
         assert!(matches!(classify(b"a,b,c\n1,2,3\n"), Ok(Route::Unknown)));
+    }
+}
+
+#[cfg(test)]
+mod name_hint_tests {
+    use super::*;
+
+    /// One column has no delimiters to be consistent about, so the bytes alone
+    /// cannot separate it from prose. A list of account numbers is a perfectly
+    /// ordinary thing for a bookkeeper to send.
+    #[test]
+    fn a_single_column_file_needs_its_name() {
+        let one = b"reference\nINV-001\nINV-002\nINV-003\n";
+        assert!(matches!(classify(one), Ok(Route::Unknown)));
+        assert!(matches!(
+            classify_with_name(one, Some("references.csv")),
+            Ok(Route::Office(_))
+        ));
+    }
+
+    /// A name is weaker evidence than a signature and must never overrule it.
+    #[test]
+    fn the_bytes_win_when_the_name_disagrees() {
+        let csv = b"a,b,c\n1,2,3\n4,5,6\n7,8,9\n";
+        assert!(matches!(
+            classify_with_name(csv, Some("actually_a_spreadsheet.docx")),
+            Ok(Route::Office(anydoc::Format::Csv))
+        ));
+    }
+
+    /// And a name alone is not enough for something we cannot even decode.
+    #[test]
+    fn a_name_cannot_rescue_bytes_we_cannot_read() {
+        let junk = &[0xFFu8, 0xD8, 0x00, 0x01, 0x02, 0x03];
+        assert!(matches!(
+            classify_with_name(junk, Some("pretend.csv")),
+            Ok(Route::Unknown)
+        ));
     }
 }
