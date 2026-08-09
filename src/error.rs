@@ -15,6 +15,15 @@ pub enum ReadError {
     #[error("PDF could not be read: {0}")]
     Pdf(String),
 
+    /// The PDF is encrypted and the password supplied did not open it.
+    ///
+    /// Many bank statements are encrypted with an empty owner password, which
+    /// a renderer opens silently. Some use the customer's date of birth. When
+    /// a password is genuinely needed this is returned rather than guessed at:
+    /// trying an account number would be worse than failing.
+    #[error("PDF is password protected; supply one with Options::pdf_password")]
+    PasswordRequired,
+
     #[error("OCR failed: {0}")]
     Ocr(#[from] ScanError),
 
