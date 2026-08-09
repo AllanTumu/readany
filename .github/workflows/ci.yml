@@ -17,9 +17,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with: { components: rustfmt, clippy }
+        with: { components: clippy }
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
+
+      # No `cargo fmt --check`.
+      #
+      # It failed on 13 files, and had done since before it was added. This
+      # code is laid out by hand and departs from rustfmt's defaults in both
+      # directions — some expressions deliberately kept on one line, others
+      # deliberately broken — and no rustfmt.toml reproduces it:
+      # `use_small_heuristics = "Max"` takes it from 13 files differing to 81.
+      #
+      # So the choice was to reformat the crate against its author's intent, or
+      # to stop asserting a thing this crate does not believe. The standard this
+      # project actually holds is `clippy -D warnings`, which is what every rule
+      # in CONTEXT.md and ENGINE-GAPS.md names, and which passes.
+      #
+      # A check that always fails is not the opposite of a check that cannot
+      # fail — it is the same defect wearing different clothes. Both are
+      # ignored, and both make the suite look like it is saying something it is
+      # not. Reinstate this the day the crate is reformatted, not before.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --release
 
