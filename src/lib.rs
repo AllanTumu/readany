@@ -30,6 +30,8 @@ mod clock;
 pub mod error;
 pub mod ocr;
 pub mod pdf;
+pub mod archive;
+pub mod limits;
 pub mod route;
 
 pub use error::{ReadError, Result};
@@ -120,6 +122,12 @@ pub struct Options<'a> {
     pub page_markers: bool,
     /// Fail rather than return a partial document.
     pub strict: bool,
+    /// What a hostile file is not allowed to do.
+    ///
+    /// Defaults to [`limits::Limits::default`], which is the documented
+    /// contract rather than "no limits". A caller reading its own files can
+    /// ask for [`limits::Limits::none`], and has to ask.
+    pub limits: limits::Limits,
 }
 
 /// Read a file with the default options and no OCR backend.
@@ -141,7 +149,32 @@ pub fn to_markdown(bytes: &[u8]) -> Result<String> {
 /// Read a file, choosing the engine from its content.
 pub fn read_with(bytes: &[u8], options: &Options) -> Result<Document> {
     let watch = clock::Stopwatch::start();
+
+    // Refuse before reading, in cost order. Sniffing a file we are going to
+    // refuse anyway is wasted work, and on a hostile file it is wasted work
+    // chosen by the attacker.
+    let limits = &options.limits;
+    if bytes.len() as u64 > limits.input_bytes {
+        return Err(error::ReadError::TooLarge(limits::Exceeded::new(
+            "input size",
+            limits.input_bytes,
+            bytes.len() as u64,
+        )));
+    }
+    // Every Office format is a zip. This is the only place the archive is
+    // measured before `anydoc` unpacks it.
+    archive::check(bytes, limits)?;
+
     let plan = route::inspect_named(bytes, options.filename)?;
+    if let Route::Pdf(p) = &plan.route {
+        if p.page_count > limits.pages {
+            return Err(error::ReadError::TooLarge(limits::Exceeded::new(
+                "pages",
+                limits.pages as u64,
+                p.page_count as u64,
+            )));
+        }
+    }
 
     let mut pages: Vec<Page> = Vec::new();
 

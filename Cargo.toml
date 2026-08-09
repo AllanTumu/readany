@@ -21,6 +21,11 @@ crate-type = ["lib", "cdylib"]
 anydoc = "0.1"
 pdf-inspector = "0.1"
 
+# Every Office format is a zip, so the bomb guard in `archive` needs to walk
+# one before `anydoc` unpacks it. Default features off: no filesystem, no
+# encryption, no time — just deflate, so the crate still builds for wasm32.
+zip = { version = "5", default-features = false, features = ["deflate-flate2"] }
+
 # The third engine, built here.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "bmp", "webp"] }
 log = "0.4"

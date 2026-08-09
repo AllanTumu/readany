@@ -24,6 +24,13 @@ pub enum ReadError {
     #[error("PDF is password protected; supply one with Options::pdf_password")]
     PasswordRequired,
 
+    /// The file crossed a limit meant to keep a hostile document from taking
+    /// the service down. Distinct from every other error because it is not a
+    /// judgement about the document at all — it is a statement about what we
+    /// are willing to spend on one.
+    #[error("refused: {0}")]
+    TooLarge(crate::limits::Exceeded),
+
     #[error("OCR failed: {0}")]
     Ocr(#[from] ScanError),
 
