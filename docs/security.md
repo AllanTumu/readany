@@ -158,7 +158,7 @@ assemblers were 97 sites to the image path's 80, and `parse` alone was 79.
 
 Four sites were genuinely reachable, and all four are the same root cause.
 
-### `Money` addition is unchecked, and document amounts reach it
+### `Money` addition was unchecked, and document amounts reached it — closed
 
 `Money` is an `i64` of minor units. `Money::parse` bounds one value, but the
 `Add` and `Sub` impls are bare `self.0 + rhs.0`.
@@ -177,13 +177,34 @@ arithmetic broke. Those two are fixed: a sum that does not fit is not a match.
 `Money::checked_add` and `checked_sub` exist and are used where the answer is
 known.
 
-**The operators themselves are still unchecked, and eleven call sites outside
-the scoped modules still use them** — `bank::total`, `mobile_money`, `summary`,
-`generic`, `payments`, `lib`. That is deliberate: what a verdict should do with
-a total that does not fit is a product decision, not a lint fix. The options
-are to saturate (a wrong number, quietly), to check and fail closed with a
-named reason (P2's typed errors, arriving early), or to refuse an out-of-range
-amount at parse. It needs deciding before P0 can close.
+**Closed by widening, not by capping.** Every derived value — every sum,
+running balance and difference — is now `Total`, an `i128`. `Money` stays `i64`
+for what a document *states*, and its `Add` and `Sub` are **deleted** rather
+than fixed, so a caller has to say which of the two it means and neither can
+wrap silently.
+
+The range settles it without a threshold: twenty thousand maximum-magnitude
+rows sum to about 1.8 × 10²³ against `i128`'s ±1.7 × 10³⁸, so no document that
+parses can overflow the accumulator. Nothing legitimate is refused, and a
+single amount too large for `i64` simply fails to parse — its row becomes
+`unparsed` and coverage decides, which is what the P1 rules already say happens
+to a row we could not read.
+
+Saturating was considered and rejected: it converts an overflow into a
+*plausible wrong number*, silently, which is worse than the wrap it replaces.
+
+Cost, measured on the corpus in release: end to end 128.2 ms → 129.3 ms, +0.9%,
+inside a ~2 ms run-to-run spread. Parse and verify in isolation over 200
+passes: +1.2% aggregate, with the two 250-row files at +2.0% and +2.8% and
+every smaller file inside noise.
+
+**The audit that followed found one more site, in kind detection.**
+`mobile_money::score_ledger` compared `bal_b == bal_a + move_b` in `i64` to
+decide whether a file is a mobile-money ledger at all — so a pair counted
+because the addition wrapped would have chosen the wrong kind for the whole
+document, not merely mis-scored a column. The end-closure routes in
+`close_the_ends` are widened for the same reason. The rule is now written down
+in `docs/assumptions.md`: **arithmetic that wrapped is not evidence.**
 
 ## The sandbox
 
@@ -218,31 +239,62 @@ timeout test began failing depending on what else was running. Any value low
 enough to stop a fork bomb breaks the user's other workers. The real control is
 the pids cgroup controller, which is per-worker and lives on Linux.
 
-### What the sandbox does not promise
+### Linux, the deployment target
 
-**Linux is unsealed.** `sandbox-exec` is macOS-only and deprecated by Apple;
-this is the development machine, not the deployment target. The Linux
-equivalent — a network namespace, a mount namespace with a read-only root, the
-pids cgroup — is **not written and not measured**, because there is no Linux
-here to measure it on and a defence that never runs is not evidence.
+`Confine` is a trait, arranged like `Rasterise`. Two implementations, and both
+are temporary — `sandbox-exec` is deprecated by Apple, and the Linux side still
+wants a pids cgroup.
 
-`Confinement::Sealed` therefore **refuses to start a job** on any platform
-where sealing is not implemented, rather than quietly downgrading it. A worker
-that believes it has no network and does is worse than one that will not start,
-because the belief is what the privacy claim is written against.
+| Promise | Linux mechanism |
+|---|---|
+| read-only root, writes only beneath scratch | Landlock, ABI v1 and up |
+| no network | `unshare(CLONE_NEWUSER \| CLONE_NEWNET)` |
+| bytes per file, memory, CPU | `setrlimit`, as before |
+
+Both were chosen for working **unprivileged**. The service will not run its
+workers as root, and a sandbox that needs root is a sandbox that gets switched
+off. The Landlock ruleset is built in the parent, where allocation is allowed;
+only `landlock_restrict_self` runs between fork and exec. Landlock handles
+*write* accesses only — a worker must still read its binary, its libraries and
+the models, so the promise is that it cannot **change** anything outside its
+scratch directory.
+
+**Measured on a real Linux kernel** (6.12, Docker, unprivileged user): the
+network namespace takes the network away with a control proving the machine was
+online; a kernel with no Landlock refuses to seal rather than sealing halfway;
+and scratch cleanup after a crash and after a kill, the file-size ceiling and
+the crash classification all hold there too.
+
+**Landlock itself is not measured yet, and this is the one open item that
+matters.** Docker Desktop's linuxkit kernel returns `ENOSYS` from
+`landlock_create_ruleset` — the symbols are compiled in, the LSM is not enabled
+— so the composed seal cannot execute on this machine at all. `.github/workflows/ci.yml`
+exists for exactly this, and its Linux job **fails loudly** when the runner's
+kernel lacks Landlock rather than skipping quietly.
+
+Every failure mode here is closed, which is why this is an unfinished
+measurement rather than an unfinished defence:
+
+- no Landlock → `Sealed` refuses to start;
+- `landlock_restrict_self` fails → `pre_exec` errors and the spawn fails;
+- an unsealable platform → refuses.
+
+There is no reachable state in which a worker believes it is sealed and is not.
+The residual risk is narrow and worth naming: a ruleset that is built
+*successfully* but more permissively than intended — a mis-packed struct, a
+wrong access flag — would not fail closed. Only a run on a Landlock kernel
+settles that.
 
 **Privilege dropping is a decision without an enforcement test.** The order —
 supplementary groups, then group, then user — is right, and
 `privileges_to_drop` is tested both ways. The `setuid` call itself never runs
-on a machine that is not root, which is every development machine. It needs a
-root suite on the deployment host.
+on a machine that is not root, which is every development machine.
 
 ## Still open
 
-- **`Money`'s unchecked `Add`/`Sub`, and the eleven call sites that use them.**
-  Blocks P0. See above.
-- **Linux sealing**, and the root suite that would exercise privilege dropping.
-  Blocks P0.
+- **Landlock has never executed successfully.** Needs one green CI run on a
+  kernel that has it. Fail-closed everywhere until then.
+- The root suite that would exercise privilege dropping.
 - Fuzzing `layout`/`parse` with hostile coordinates, and the OFX/QBO writers
   with hostile strings. The OFX writer matters most: a string that escapes its
   tag is an injection into the user's accounting software.
@@ -253,3 +305,4 @@ root suite on the deployment host.
   (two vectors assumed parallel when one is filtered) may exist elsewhere.
 - `anydoc` owns the decompression that matters; the cap is a pre-flight here.
   Offer it upstream, and only then decide about a fork.
+- A pids cgroup, the per-worker fork-bomb ceiling `RLIMIT_NPROC` cannot be.
