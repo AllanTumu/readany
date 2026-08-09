@@ -101,6 +101,13 @@ pub fn resolve(spec: &ModelSpec) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
+    /// `ANYSCAN_HOME` is process-global, so the three tests that set it cannot
+    /// run at the same time. Without this they pass or fail depending on the
+    /// order the harness happens to pick — which is how this surfaced: adding
+    /// unrelated tests elsewhere in the crate changed the order and one of
+    /// these started failing.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
     use std::io::Write;
 
@@ -124,6 +131,7 @@ mod tests {
 
     #[test]
     fn cache_dir_respects_the_override() {
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("ANYSCAN_HOME", "/tmp/anyscan-test-home");
         assert_eq!(cache_dir(), PathBuf::from("/tmp/anyscan-test-home"));
         std::env::remove_var("ANYSCAN_HOME");
@@ -131,6 +139,7 @@ mod tests {
 
     #[test]
     fn a_missing_model_says_where_it_should_be() {
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ANYSCAN_HOME", dir.path());
         let spec = ModelSpec {
@@ -148,6 +157,7 @@ mod tests {
 
     #[test]
     fn a_tampered_model_is_rejected() {
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ANYSCAN_HOME", dir.path());
         let mut f = std::fs::File::create(dir.path().join("rec-tiny.onnx")).unwrap();

@@ -165,7 +165,7 @@ fn sniff_delimited(bytes: &[u8]) -> Option<anydoc::Format> {
         return None;
     }
 
-    for delimiter in [b',', b';', b'\t', b'|'] {
+    for delimiter in *b",;\t|" {
         let counts: Vec<usize> = lines.iter().map(|l| count_outside_quotes(l, delimiter)).collect();
         let first = counts[0];
         if first == 0 {
