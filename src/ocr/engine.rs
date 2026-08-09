@@ -45,7 +45,19 @@ pub struct ScanOptions {
 }
 
 impl Default for ScanOptions {
+    /// The photograph profile. See [`ScanOptions::for_photograph`].
     fn default() -> Self {
+        ScanOptions::for_photograph()
+    }
+}
+
+impl ScanOptions {
+    /// A photograph: unknown lighting, tilt, orientation and background.
+    ///
+    /// Every correction on. These were tuned on seven real photographed
+    /// receipts and each one earned its place there — cropping the document
+    /// out of the table was worth more than any other single change.
+    pub fn for_photograph() -> Self {
         ScanOptions {
             flatten_lighting: true,
             crop_to_content: true,
@@ -53,6 +65,45 @@ impl Default for ScanOptions {
             fix_skew: true,
             confidence_floor: 0.5,
             retry_when_unsure: true,
+        }
+    }
+
+    /// A page rendered from a PDF: clean, straight, upright, full bleed.
+    ///
+    /// Every geometric correction **off**, and this is not a small tuning
+    /// preference. Measured on a rendered CaixaBank page at 300 dpi:
+    ///
+    /// | Profile | Handed to detector | Lines | Lines with digits |
+    /// |---|---|---|---|
+    /// | photograph | 560 × 2594 (22.6% of width) | 21 | **0** |
+    /// | rendered page | 2480 × 3507 (100%) | **68** | **44** |
+    ///
+    /// `crop_to_content` is the one that does the damage. It finds the
+    /// document by texture, and on a bank statement the merchant descriptions
+    /// are dense while the amount and balance columns are sparse right-aligned
+    /// figures on white. Texture detection reads that white space as
+    /// background and cuts the page down to the dense column, so **the numbers
+    /// never reach the network at all**.
+    ///
+    /// That single fact explained a whole set of flat measurements: dpi from
+    /// 150 to 400, `max_side` from 960 to 3200 and both detector thresholds
+    /// all changed nothing, because every one of them operated on an image the
+    /// amounts had already been cut out of.
+    ///
+    /// The other three corrections are harmless here but pointless: a rendered
+    /// page has no fold shadow to flatten, no skew to estimate and no
+    /// orientation to guess. Leaving them on costs about 2.7× the time for an
+    /// identical result.
+    pub fn for_rendered_page() -> Self {
+        ScanOptions {
+            flatten_lighting: false,
+            crop_to_content: false,
+            fix_orientation: false,
+            fix_skew: false,
+            confidence_floor: 0.5,
+            // Nothing to retry *with*: the corrections that a retry turns off
+            // are already off.
+            retry_when_unsure: false,
         }
     }
 }
@@ -324,6 +375,55 @@ fn crop_quad(img: &GrayImage, quad: &Quad) -> GrayImage {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::ScanOptions;
+
+    #[test]
+    fn the_rendered_page_profile_does_not_crop() {
+        // The whole bug: `crop_to_content` cut a bank statement down to its
+        // description column, so the amounts never reached the network.
+        // Measured 2480x3507 -> 560x2594, and 44 lines with digits -> 0.
+        let o = ScanOptions::for_rendered_page();
+        assert!(!o.crop_to_content, "cropping a rendered page removes its columns");
+        assert!(!o.flatten_lighting, "a rendered page has no shadow to flatten");
+        assert!(!o.fix_skew, "a rendered page is straight");
+        assert!(!o.fix_orientation, "a rendered page is upright");
+    }
+
+    #[test]
+    fn the_photograph_profile_keeps_every_correction() {
+        // Each was earned on seven real photographed receipts.
+        let o = ScanOptions::for_photograph();
+        assert!(o.crop_to_content);
+        assert!(o.flatten_lighting);
+        assert!(o.fix_skew);
+        assert!(o.fix_orientation);
+        assert!(o.retry_when_unsure);
+    }
+
+    #[test]
+    fn the_default_is_the_photograph_profile() {
+        // Unchanged behaviour for every existing caller: only the rasteriser
+        // path opts into the new profile.
+        let d = ScanOptions::default();
+        let p = ScanOptions::for_photograph();
+        assert_eq!(d.crop_to_content, p.crop_to_content);
+        assert_eq!(d.flatten_lighting, p.flatten_lighting);
+        assert_eq!(d.fix_skew, p.fix_skew);
+        assert_eq!(d.fix_orientation, p.fix_orientation);
+    }
+
+    #[test]
+    fn the_two_profiles_are_not_the_same() {
+        assert_ne!(
+            ScanOptions::for_photograph().crop_to_content,
+            ScanOptions::for_rendered_page().crop_to_content,
+            "a page render and a photograph must not share preparation defaults"
+        );
+    }
 }
 
 #[cfg(test)]
