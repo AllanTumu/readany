@@ -37,7 +37,7 @@ env_logger = "0.11"
 
 [dev-dependencies]
 tempfile = "3"
-statement = { path = "../statement" }
+readany-verify = { path = "../readany-verify" }
 zip = { version = "5", default-features = false, features = ["deflate-flate2"] }
 
 [[bin]]

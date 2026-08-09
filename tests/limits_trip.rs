@@ -265,11 +265,11 @@ fn every_limit_has_an_end_to_end_refusal() {
         ),
         (
             "wall_clock_seconds",
-            Enforcement::Outside("killed by the worker parent; see statement::worker"),
+            Enforcement::Outside("killed by the worker parent; see readany_verify::worker"),
         ),
         (
             "resident_bytes",
-            Enforcement::Outside("setrlimit in the child; see statement::worker"),
+            Enforcement::Outside("setrlimit in the child; see readany_verify::worker"),
         ),
     ];
 

@@ -97,13 +97,13 @@ fn no_document_content_reaches_any_log_or_error_channel() {
     eprintln!("planted-token sweep: {reads_seen} read(s), {errors_seen} error(s) inspected");
 }
 
-/// The same, through the statement engine's own error and verdict surfaces.
+/// The same, through the verification engine's own error and verdict surfaces.
 #[test]
 fn no_document_content_reaches_a_verdict_summary_or_error() {
     let bytes = planted_csv();
     let mut findings = Vec::new();
 
-    match statement::convert(&bytes, "planted.csv") {
+    match readany_verify::convert(&bytes, "planted.csv") {
         Ok(c) => {
             // A verdict names rows by date and description on purpose — that
             // is what makes a break actionable — so the verdict summary is
@@ -117,16 +117,16 @@ fn no_document_content_reaches_a_verdict_summary_or_error() {
                 ("ends", format!("{:?}", c.ends())),
             ] {
                 if text.contains(TOKEN) {
-                    findings.push(format!("statement: {channel}"));
+                    findings.push(format!("readany-verify: {channel}"));
                 }
             }
         }
         Err(e) => {
             if e.to_string().contains(TOKEN) {
-                findings.push("statement: Display of the error".into());
+                findings.push("readany-verify: Display of the error".into());
             }
             if format!("{e:?}").contains(TOKEN) {
-                findings.push("statement: Debug of the error".into());
+                findings.push("readany-verify: Debug of the error".into());
             }
         }
     }
