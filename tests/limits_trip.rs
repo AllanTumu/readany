@@ -115,3 +115,83 @@ fn the_uncountable_limits_are_documented_not_silently_absent() {
     assert_eq!(l.wall_clock_seconds, 60, "enforced by killing the worker");
     assert_eq!(l.resident_bytes, 1024 * 1024 * 1024, "enforced by the kernel");
 }
+
+/// The pixel ceiling, at the one place that bounds every buffer after it.
+///
+/// A 137 KB PNG declaring 12000 square decoded to 144 megapixels — 3.6× the
+/// documented ceiling — until this was enforced. The ceiling had been written
+/// down, unit-tested, and never called on this path.
+///
+/// The refusal is read from the header, so the file does not have to be large
+/// to declare a large picture. These headers carry almost no pixel data at all.
+#[test]
+fn an_image_past_the_pixel_ceiling_is_refused_from_its_header() {
+    let png = header_only_png(12_000, 12_000);
+    assert!(png.len() < 4096, "the refusal must not depend on a large file");
+
+    let err = readany::ocr::image::decode_bytes(&png).unwrap_err();
+    assert!(err.to_string().contains("image pixels"), "{err}");
+    assert!(err.to_string().contains("144000000"), "the value that broke it: {err}");
+    assert!(err.to_string().contains("40000000"), "the documented ceiling: {err}");
+}
+
+#[test]
+fn raising_the_ceiling_is_what_lets_it_through() {
+    // The same header, refused by the limit and then not by the limit. It
+    // still fails to decode, because it carries no pixels — but the *reason*
+    // moves, which is how we know the limit was doing the work.
+    let png = header_only_png(8_000, 6_000);
+    let strict = readany::ocr::image::decode_bytes(&png).unwrap_err().to_string();
+    assert!(strict.contains("image pixels"), "{strict}");
+
+    let generous = Limits { pixels_per_page: 100_000_000, ..Limits::default() };
+    let loose = readany::ocr::image::decode::decode_bytes_within(&png, &generous);
+    if let Err(e) = loose {
+        assert!(!e.to_string().contains("image pixels"), "still the limit: {e}");
+    }
+}
+
+/// An ordinary photograph is unaffected.
+#[test]
+fn a_normal_image_still_decodes() {
+    let img = image::GrayImage::from_pixel(640, 480, image::Luma([200]));
+    let mut png = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("encode");
+    let decoded = readany::ocr::image::decode_bytes(&png).expect("a real image must read");
+    assert_eq!(decoded.dimensions(), (640, 480));
+}
+
+/// A valid PNG header declaring any dimensions, with a token IDAT.
+///
+/// The decoder allocates from the header, which is the property under test.
+fn header_only_png(w: u32, h: u32) -> Vec<u8> {
+    fn chunk(tag: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut out = (data.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(tag);
+        out.extend_from_slice(data);
+        out.extend_from_slice(&crc32(&[tag, data].concat()).to_be_bytes());
+        out
+    }
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&w.to_be_bytes());
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend(chunk(b"IHDR", &ihdr));
+    png.extend(chunk(b"IDAT", &[0x78, 0x01, 0x01, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01]));
+    png.extend(chunk(b"IEND", b""));
+    png
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for byte in data {
+        crc ^= *byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}

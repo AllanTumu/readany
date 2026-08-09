@@ -15,6 +15,14 @@ pub enum ScanError {
     #[error("no text was found in the image")]
     NoText,
 
+    /// The image is larger than we are willing to work on.
+    ///
+    /// Not a judgement about the picture. A 137 KB PNG declaring 12000 square
+    /// decodes to 144 megapixels, and every buffer downstream is sized from
+    /// those dimensions.
+    #[error("refused: {0}")]
+    TooLarge(crate::limits::Exceeded),
+
     #[error("model {name} is not available locally; run with auto-download or preseed {path}")]
     ModelMissing { name: String, path: PathBuf },
 
