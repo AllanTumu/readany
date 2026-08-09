@@ -101,39 +101,10 @@ fn no_document_content_reaches_any_log_or_error_channel() {
     eprintln!("planted-token sweep: {reads_seen} read(s), {errors_seen} error(s) inspected");
 }
 
-/// The same, through the verification engine's own error and verdict surfaces.
-#[test]
-fn no_document_content_reaches_a_verdict_summary_or_error() {
-    let bytes = planted_csv();
-    let mut findings = Vec::new();
-
-    match readany_verify::convert(&bytes, "planted.csv") {
-        Ok(c) => {
-            // A verdict names rows by date and description on purpose — that
-            // is what makes a break actionable — so the verdict summary is
-            // *expected* to carry content and is not a leak. What must not is
-            // anything an operator would log about the job.
-            for (channel, text) in [
-                ("outcome", format!("{:?}", c.outcome)),
-                ("provenance", format!("{:?}", c.verdict.provenance)),
-                ("coverage", format!("{:?}", c.coverage())),
-                ("coverage gaps", c.coverage_gaps().join(" ")),
-                ("ends", format!("{:?}", c.ends())),
-            ] {
-                if text.contains(TOKEN) {
-                    findings.push(format!("readany-verify: {channel}"));
-                }
-            }
-        }
-        Err(e) => {
-            if e.to_string().contains(TOKEN) {
-                findings.push("readany-verify: Display of the error".into());
-            }
-            if format!("{e:?}").contains(TOKEN) {
-                findings.push("readany-verify: Debug of the error".into());
-            }
-        }
-    }
-
-    assert!(findings.is_empty(), "document content escaped:\n  {}", findings.join("\n  "));
-}
+// The verdict-surface half of this sweep now lives in `readany-verify`.
+//
+// It was here, which made this crate — public, MIT, on npm — carry a path
+// dev-dependency on a private sibling. No runner can check out a private repo,
+// so this crate's own CI failed at dependency resolution on every push, and
+// nobody cloning it could run `cargo test` at all. A public crate that cannot
+// build in its own CI is a worse defect than one fixture defined in two places.
