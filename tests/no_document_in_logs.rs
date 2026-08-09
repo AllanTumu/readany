@@ -13,9 +13,13 @@ use std::io::Write;
 /// Long, unique, and not a substring of anything a library would emit.
 const TOKEN: &str = "ZQXJVBWKPMHGDF-planted-secret-74619283";
 
+/// Every value here is invented. The row this fixture started from was copied
+/// out of a real bank statement — its date, its amount and its closing balance
+/// — into a public repository, which is the one place this project's own rule
+/// says a balance may never go. The test needs a row with a date, a signed
+/// amount and a balance; it never needed *that* row.
 fn planted_csv() -> Vec<u8> {
-    format!("Date,Description,Amount,Balance\n01/01/2020,{TOKEN},-10.00,1000.00\n")
-        .into_bytes()
+    format!("Date,Description,Amount,Balance\n01/01/2020,{TOKEN},-10.00,1000.00\n").into_bytes()
 }
 
 fn planted_xlsx() -> Vec<u8> {
