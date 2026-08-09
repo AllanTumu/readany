@@ -52,6 +52,7 @@ killing is not available.
 | Zip nesting depth | 2 | `archive::check`, recursively |
 | Wall clock per job | 60 s | **killing the worker** |
 | Resident memory per job | 1 GB | **`setrlimit` in the child** |
+| Bytes in any one file a worker writes | 256 MB | **`RLIMIT_FSIZE` in the child** |
 
 The last two cannot be enforced inside the process doing the work. Rust has no
 safe way to stop a thread, so a parser in a loop can only be stopped by killing
@@ -137,12 +138,118 @@ parse, the ledger writers, and the image pipeline.
 `examples/fuzz.rs` runs on stable so it can live in CI rather than on one
 laptop. `cargo-fuzz` is installed for deeper runs.
 
+## The panicking forms are denied where untrusted input arrives
+
+Scoped to the modules that read what a stranger sent, and nothing else:
+`route`, `archive`, the image decode and prepare path, `layout`, `parse`, and
+the writers. Not crate-wide, and not on test modules — `unwrap` in a test is an
+assertion, and denying it there produces the noise that gets a deny switched
+off.
+
+`unwrap_used`, `expect_used`, `indexing_slicing`, `arithmetic_side_effects`.
+**194 sites, every one converted, none allowed.** The counts are in the run
+report; what matters here is which of them were more than lint-quieting.
+
+**`indexing_slicing` produced more noise than `arithmetic_side_effects`** — 100
+sites against 93 — against a prediction that the arithmetic lint would dominate
+and might have to be dropped. It did not have to be dropped. The prediction was
+also that the image path would be the slow half and the assemblers quick; the
+assemblers were 97 sites to the image path's 80, and `parse` alone was 79.
+
+Four sites were genuinely reachable, and all four are the same root cause.
+
+### `Money` addition is unchecked, and document amounts reach it
+
+`Money` is an `i64` of minor units. `Money::parse` bounds one value, but the
+`Add` and `Sub` impls are bare `self.0 + rhs.0`.
+
+Measured, through the real parser: a **two-row CSV** whose amounts are 5e16
+units parses cleanly, and `total()` returns **−8446744073709551616** — a
+negative movement from two positive amounts. The same document **panics inside
+`from_document`** in a debug build. The worker profile inherits `release`,
+where overflow checks are off, so production wraps silently.
+
+This is not only a wrong number in a report. `score_pair` and
+`score_debit_credit` decide which column is the balance by testing
+`balance[i] == balance[i+1] + amount[i]`. A wrapped sum landing on the printed
+balance is a hit the column never earned — a check passing *because* the
+arithmetic broke. Those two are fixed: a sum that does not fit is not a match.
+`Money::checked_add` and `checked_sub` exist and are used where the answer is
+known.
+
+**The operators themselves are still unchecked, and eleven call sites outside
+the scoped modules still use them** — `bank::total`, `mobile_money`, `summary`,
+`generic`, `payments`, `lib`. That is deliberate: what a verdict should do with
+a total that does not fit is a product decision, not a lint fix. The options
+are to saturate (a wrong number, quietly), to check and fail closed with a
+named reason (P2's typed errors, arriving early), or to refuse an out-of-range
+amount at parse. It needs deciding before P0 can close.
+
+## The sandbox
+
+Tested by violating each restriction from inside a worker, then falsified by
+disabling the mechanism and confirming the test fails.
+
+| Restriction | Enforced by | Holds here |
+|---|---|---|
+| No network | `sandbox-exec` profile, `deny network*` | yes, with a control proving the machine is online |
+| No write outside one scratch directory | `deny file-write*` plus one `subpath` | yes |
+| Read-only root | the same `deny file-write*` | yes |
+| Scratch emptied after **every** job | the parent, after any outcome | yes, tested after an abort and after a kill |
+| Bytes per file | `RLIMIT_FSIZE` | yes |
+| Dropped privileges | `setgroups`/`setgid`/`setuid` before exec | **decision only** |
+
+**The temp directory was emptied after no job at all.** The prediction was that
+cleanup existed for a clean worker and not a crashed one. In fact `Scratch` was
+referenced only by its own unit test — `run` never touched it, so nothing was
+ever cleaned up on any path. It is the parent's now, because a worker killed at
+the wall clock or aborted from C++ never reaches its own tidy-up, and those are
+exactly the runs that leave a half-written page behind.
+
+**A vacuous test, caught by falsification.** The read-only-root test wrote to
+`/usr/local` and passed with sealing switched off: an unprivileged user cannot
+write there anyway, so it tested the machine's permissions. It now writes
+somewhere this user certainly can, with the unsealed control inside the test.
+
+**`RLIMIT_NPROC` is not a fork-bomb ceiling and was removed.** It counts every
+process owned by the *user*, not the worker's children. At 64 it was breached
+by the machine's own processes, so `/bin/sh` could not fork and an unrelated
+timeout test began failing depending on what else was running. Any value low
+enough to stop a fork bomb breaks the user's other workers. The real control is
+the pids cgroup controller, which is per-worker and lives on Linux.
+
+### What the sandbox does not promise
+
+**Linux is unsealed.** `sandbox-exec` is macOS-only and deprecated by Apple;
+this is the development machine, not the deployment target. The Linux
+equivalent — a network namespace, a mount namespace with a read-only root, the
+pids cgroup — is **not written and not measured**, because there is no Linux
+here to measure it on and a defence that never runs is not evidence.
+
+`Confinement::Sealed` therefore **refuses to start a job** on any platform
+where sealing is not implemented, rather than quietly downgrading it. A worker
+that believes it has no network and does is worse than one that will not start,
+because the belief is what the privacy claim is written against.
+
+**Privilege dropping is a decision without an enforcement test.** The order —
+supplementary groups, then group, then user — is right, and
+`privileges_to_drop` is tested both ways. The `setuid` call itself never runs
+on a machine that is not root, which is every development machine. It needs a
+root suite on the deployment host.
+
 ## Still open
 
-- Part 7, the sandbox: no network, dropped privileges, read-only root.
+- **`Money`'s unchecked `Add`/`Sub`, and the eleven call sites that use them.**
+  Blocks P0. See above.
+- **Linux sealing**, and the root suite that would exercise privilege dropping.
+  Blocks P0.
 - Fuzzing `layout`/`parse` with hostile coordinates, and the OFX/QBO writers
   with hostile strings. The OFX writer matters most: a string that escapes its
   tag is an injection into the user's accounting software.
-- The panic audit of library paths on untrusted input.
+- `to_ofx_date` indexed a filtered vector against an unfiltered one — `n` drops
+  any field too large for a `u32`, shifting every field after it. The month
+  range check rejects the shifted case, so nothing reachable was wrong, but the
+  alignment was an accident. Taken by name now; recorded because the *class*
+  (two vectors assumed parallel when one is filtered) may exist elsewhere.
 - `anydoc` owns the decompression that matters; the cap is a pre-flight here.
   Offer it upstream, and only then decide about a fork.
