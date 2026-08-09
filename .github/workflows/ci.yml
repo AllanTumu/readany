@@ -4,6 +4,13 @@ on:
   push: { branches: [main] }
   pull_request: { branches: [main] }
 
+# No runner can hold the corpus — those are real financial documents and are
+# never committed. The absence has to be declared, or the tests that read them
+# fail instead of skipping. That is deliberate: a skip nobody declared is how
+# the page-limit test guarded nothing without anyone noticing.
+env:
+  STATEMENT_CORPUS_ABSENT: 1
+
 jobs:
   test:
     runs-on: ubuntu-latest

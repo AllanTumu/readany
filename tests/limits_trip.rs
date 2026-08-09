@@ -85,16 +85,39 @@ fn nesting_past_the_depth_is_refused_through_the_real_entry_point() {
 }
 
 /// The page limit, driven through `read_with` on a real multi-page PDF.
+///
+/// **Unset is a failure, not a skip.** This is the same defect that made
+/// `readany-verify`'s corpus suite assert nothing for several rounds, sitting
+/// in a different crate — which is the whole point of the rule that a guard
+/// scoped to where you last found the bug is scoped to the past. The sweep
+/// that found the first one was scoped to one crate and would have missed
+/// this. It guards the page limit, one of the eight limits P0 claims has an
+/// end-to-end refusal, and it silently guarded nothing whenever the variable
+/// was unset.
+///
+/// A run that genuinely has no corpus — every CI runner, since these are real
+/// financial documents and are never committed — declares it with
+/// `STATEMENT_CORPUS_ABSENT=1`.
 #[test]
 fn the_page_limit_trips_on_a_real_pdf() {
-    let path = std::path::PathBuf::from(
-        std::env::var("STATEMENT_TEST_FILES").unwrap_or_default(),
-    )
-    .join("extractDocument_20260808.pdf");
-    if !path.exists() {
-        eprintln!("skipped: set STATEMENT_TEST_FILES to a directory of real statements");
-        return;
-    }
+    let dir = match std::env::var("STATEMENT_TEST_FILES") {
+        Ok(d) if !d.is_empty() => d,
+        _ => {
+            assert!(
+                std::env::var_os("STATEMENT_CORPUS_ABSENT").is_some(),
+                "STATEMENT_TEST_FILES is not set, so the page limit would be tested \
+                 against nothing. Point it at the corpus directory, or set \
+                 STATEMENT_CORPUS_ABSENT=1 to declare that this run has no corpus."
+            );
+            eprintln!("DECLARED SKIP: STATEMENT_CORPUS_ABSENT is set — the page limit is untested here");
+            return;
+        }
+    };
+    let path = std::path::PathBuf::from(dir).join("extractDocument_20260808.pdf");
+    assert!(
+        path.is_file(),
+        "the corpus is present but lost extractDocument_20260808.pdf — it shrank"
+    );
     let bytes = std::fs::read(&path).expect("read");
 
     // The real file has five pages.
