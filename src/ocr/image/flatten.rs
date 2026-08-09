@@ -29,6 +29,13 @@ const RADIUS_FRACTION: f32 = 0.04;
 /// Never go below this, or fine print on a small image erases itself.
 const MIN_RADIUS: u32 = 8;
 
+/// The largest summed-area table this will build.
+///
+/// Eight bytes a cell, so this is a 400 MB ceiling on one allocation derived
+/// from an attacker's declared dimensions. Matched to the documented
+/// per-page pixel limit so the two cannot drift apart silently.
+const MAX_TABLE_CELLS: u64 = 50_000_000;
+
 /// Even out the lighting across a page.
 pub fn flatten(img: &GrayImage) -> GrayImage {
     let (w, h) = img.dimensions();
@@ -38,7 +45,23 @@ pub fn flatten(img: &GrayImage) -> GrayImage {
     let radius = ((w.max(h) as f32 * RADIUS_FRACTION) as u32).max(MIN_RADIUS);
 
     // Summed-area table, so any box mean is four lookups.
-    let mut sum = vec![0u64; ((w + 1) * (h + 1)) as usize];
+    //
+    // **Computed in u64 and refused on overflow.** The dimensions come from a
+    // decoded image, which is to say from whoever sent the file. In `u32`,
+    // `(w + 1) * (h + 1)` for a 65535-square image is exactly 2^32 and wraps
+    // to **zero**: the table would be allocated empty and the very next line
+    // would index it, panicking. A panic here is a denial of service reachable
+    // by anyone who can upload a picture.
+    //
+    // Flattening is an enhancement, not a requirement, so an image too large
+    // to build a table for is returned unchanged rather than refused.
+    let Some(cells) = (w as u64 + 1).checked_mul(h as u64 + 1) else {
+        return img.clone();
+    };
+    if cells > MAX_TABLE_CELLS {
+        return img.clone();
+    }
+    let mut sum = vec![0u64; cells as usize];
     for y in 0..h {
         let mut row = 0u64;
         for x in 0..w {
@@ -75,6 +98,36 @@ pub fn flatten(img: &GrayImage) -> GrayImage {
 
 #[cfg(test)]
 mod tests {
+    /// The wrap that would have panicked, as a test.
+    ///
+    /// A 65535-square image makes `(w + 1) * (h + 1)` exactly 2^32, which is
+    /// zero in `u32`. The table would have been allocated empty and indexed on
+    /// the next line. Building the image is not possible in a test — that is
+    /// 4 gigapixels — so the arithmetic is asserted directly.
+    #[test]
+    fn the_summed_area_table_size_cannot_wrap() {
+        let (w, h) = (65_535u32, 65_535u32);
+        assert_eq!(
+            (w + 1).wrapping_mul(h + 1),
+            0,
+            "the wrap this guard exists to prevent"
+        );
+        // Honestly, it is 2^32 and over the ceiling, so the image comes back
+        // untouched instead of the table being built.
+        let cells = (w as u64 + 1) * (h as u64 + 1);
+        assert_eq!(cells, 1u64 << 32);
+        assert!(cells > MAX_TABLE_CELLS);
+    }
+
+    #[test]
+    fn an_oversized_image_is_returned_unchanged_rather_than_refused() {
+        // Flattening is an enhancement. Too large to help with is not an
+        // error; it is a picture we hand back as it came.
+        let img = GrayImage::from_pixel(16, 16, image::Luma([128]));
+        let flattened = flatten(&img);
+        assert_eq!(flattened.dimensions(), (16, 16));
+    }
+
     use super::*;
 
     /// Paper under a shadow must end up as bright as paper in the light, so a
