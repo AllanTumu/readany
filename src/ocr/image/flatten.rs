@@ -19,6 +19,15 @@
 //! by it. Paper becomes uniformly white wherever it is, shadow or not, and ink
 //! keeps its contrast against it. This is a summed-area table, so it costs one
 //! pass over the image regardless of how large the blur is.
+//!
+//! This module held one of the two real integer wraps, so the panicking forms
+//! are denied here rather than trusted to review. See `docs/security.md`.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 
 use super::GrayImage;
 
@@ -35,6 +44,30 @@ const MIN_RADIUS: u32 = 8;
 /// from an attacker's declared dimensions. Matched to the documented
 /// per-page pixel limit so the two cannot drift apart silently.
 const MAX_TABLE_CELLS: u64 = 50_000_000;
+
+/// Where cell `(row, column)` of a `stride`-wide table lives, or `None` if that
+/// offset does not fit a `usize`.
+///
+/// The wrap this replaces was the real one: `(w + 1) * (h + 1)` in `u32` is
+/// exactly 2^32 for a 65535-square image, which wraps to zero and hands the
+/// next line an empty table to index.
+fn cell_index(row: u32, column: u32, stride: usize) -> Option<usize> {
+    (row as usize)
+        .checked_mul(stride)?
+        .checked_add(column as usize)
+}
+
+/// A table cell, or zero when the coordinates fall outside it.
+///
+/// Every caller here is inside the table by construction; returning zero rather
+/// than panicking means a future one that is not costs a wrong mean instead of
+/// a crash on a page a stranger uploaded.
+fn read(table: &[u64], row: u32, column: u32, stride: usize) -> u64 {
+    cell_index(row, column, stride)
+        .and_then(|i| table.get(i))
+        .copied()
+        .unwrap_or(0)
+}
 
 /// Even out the lighting across a page.
 pub fn flatten(img: &GrayImage) -> GrayImage {
@@ -55,36 +88,52 @@ pub fn flatten(img: &GrayImage) -> GrayImage {
     //
     // Flattening is an enhancement, not a requirement, so an image too large
     // to build a table for is returned unchanged rather than refused.
-    let Some(cells) = (w as u64 + 1).checked_mul(h as u64 + 1) else {
+    let Some(cells) = u64::from(w)
+        .saturating_add(1)
+        .checked_mul(u64::from(h).saturating_add(1))
+    else {
         return img.clone();
     };
     if cells > MAX_TABLE_CELLS {
         return img.clone();
     }
+    // One row longer and one column wider than the image, with a zero first row
+    // and column, so a box mean is four lookups and needs no edge cases.
+    let stride = (w as usize).saturating_add(1);
     let mut sum = vec![0u64; cells as usize];
     for y in 0..h {
-        let mut row = 0u64;
+        let mut running = 0u64;
         for x in 0..w {
-            row += img.get_pixel(x, y).0[0] as u64;
-            sum[((y + 1) * (w + 1) + x + 1) as usize] = sum[(y * (w + 1) + x + 1) as usize] + row;
+            running = running.saturating_add(u64::from(img.get_pixel(x, y).0[0]));
+            let column = x.saturating_add(1);
+            let above = read(&sum, y, column, stride);
+            if let Some(cell) =
+                cell_index(y.saturating_add(1), column, stride).and_then(|i| sum.get_mut(i))
+            {
+                *cell = above.saturating_add(running);
+            }
         }
     }
     let mean = |x0: u32, y0: u32, x1: u32, y1: u32| -> f32 {
-        let a = sum[(y0 * (w + 1) + x0) as usize];
-        let b = sum[(y0 * (w + 1) + x1) as usize];
-        let c = sum[(y1 * (w + 1) + x0) as usize];
-        let d = sum[(y1 * (w + 1) + x1) as usize];
-        let n = ((x1 - x0) * (y1 - y0)) as f32;
-        (d + a - b - c) as f32 / n.max(1.0)
+        let a = read(&sum, y0, x0, stride);
+        let b = read(&sum, y0, x1, stride);
+        let c = read(&sum, y1, x0, stride);
+        let d = read(&sum, y1, x1, stride);
+        let n = x1.saturating_sub(x0).saturating_mul(y1.saturating_sub(y0)) as f32;
+        // Inclusion-exclusion: `a + d` is the pair that spans the box, `b + c`
+        // is what that pair double counts. The corners of a summed-area table
+        // are monotonic, so the difference is never negative.
+        let total = d.saturating_add(a).saturating_sub(b.saturating_add(c));
+        total as f32 / n.max(1.0)
     };
 
     let mut out = GrayImage::new(w, h);
     for y in 0..h {
         let y0 = y.saturating_sub(radius);
-        let y1 = (y + radius + 1).min(h);
+        let y1 = y.saturating_add(radius).saturating_add(1).min(h);
         for x in 0..w {
             let x0 = x.saturating_sub(radius);
-            let x1 = (x + radius + 1).min(w);
+            let x1 = x.saturating_add(radius).saturating_add(1).min(w);
             let background = mean(x0, y0, x1, y1).max(1.0);
             let v = img.get_pixel(x, y).0[0] as f32;
             // Divide, do not subtract. Shadow scales the paper and the ink
@@ -98,6 +147,15 @@ pub fn flatten(img: &GrayImage) -> GrayImage {
 
 #[cfg(test)]
 mod tests {
+    // See the note on the same allow in `route`. This module in particular
+    // asserts *about* wrapping arithmetic, so denying it here would be absurd.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     /// The wrap that would have panicked, as a test.
     ///
     /// A 65535-square image makes `(w + 1) * (h + 1)` exactly 2^32, which is

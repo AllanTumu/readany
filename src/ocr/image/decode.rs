@@ -1,3 +1,14 @@
+//! Decoding an image whose header a stranger wrote.
+//!
+//! This is the choke point named in `docs/security.md`, so the panicking forms
+//! are denied here rather than trusted to review.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
 use crate::limits::{Exceeded, Limits};
 use crate::ocr::error::{Result, ScanError};
 use std::path::Path;
@@ -40,15 +51,16 @@ pub fn decode_bytes_within(bytes: &[u8], limits: &Limits) -> Result<GrayImage> {
         .with_guessed_format()
         .map_err(|e| ScanError::Decode(e.to_string()))?;
 
-    if reader.format().is_none() {
+    // Bound once, by value: `ImageFormat` is `Copy`, so the format survives the
+    // reader being consumed below and there is nothing left to re-check later.
+    let Some(format) = reader.format() else {
         return Err(ScanError::Unsupported(
             "unrecognised image content; anyscan reads JPEG, PNG, TIFF, BMP and WebP".into(),
         ));
-    }
+    };
 
     // The header, not the pixels. `into_dimensions` consumes the reader, so
     // the decoding reader is built again from the same in-memory bytes.
-    let format = reader.format();
     let (width, height) = reader
         .into_dimensions()
         .map_err(|e| ScanError::Decode(e.to_string()))?;
@@ -61,7 +73,7 @@ pub fn decode_bytes_within(bytes: &[u8], limits: &Limits) -> Result<GrayImage> {
     }
 
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
-    reader.set_format(format.expect("a format was found above"));
+    reader.set_format(format);
     // Belt to the dimension check's braces: the decoder refuses to allocate
     // past the ceiling even if a header under-reports what it will produce.
     let mut image_limits = image::Limits::default();

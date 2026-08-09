@@ -4,6 +4,15 @@
 //! the angle that maximises the variance of that projection straightens it.
 //! This is cheap, needs no model, and handles the +/- 15 degrees that scanners
 //! and phone photos usually introduce.
+//!
+//! Every buffer here is sized from a decoded image's own dimensions, so the
+//! panicking forms are denied. See `docs/security.md`.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 
 use super::binarize::ink_mask;
 use super::GrayImage;
@@ -79,16 +88,26 @@ fn best_angle(mask: &[bool], w: u32, h: u32, from: f32, to: f32, step: f32) -> (
 fn projection_variance(mask: &[bool], w: u32, h: u32, angle: f32) -> f64 {
     let slope = (-angle).to_radians().tan();
     let mut rows = vec![0u32; h as usize];
+    // `chunks` panics on a zero width, and a zero-sided page has no projection.
+    if w == 0 || h == 0 {
+        return 0.0;
+    }
 
-    for y in 0..h {
-        let row_start = (y as usize) * (w as usize);
-        for x in 0..w {
-            if !mask[row_start + x as usize] {
+    // Walking the mask a row at a time replaces the flattened `y * w + x`.
+    for (y, row) in mask.chunks(w as usize).enumerate().take(h as usize) {
+        for (x, &inked) in row.iter().enumerate() {
+            if !inked {
                 continue;
             }
             let shifted = y as f32 + slope * (x as f32 - w as f32 / 2.0);
-            if shifted >= 0.0 && shifted < h as f32 {
-                rows[shifted as usize] += 1;
+            // The lower bound has to be tested *before* the cast: a negative
+            // f32 casts to 0, which would silently credit the top row rather
+            // than fall out of range and be caught by `get_mut`.
+            if shifted < 0.0 || shifted >= h as f32 {
+                continue;
+            }
+            if let Some(count) = rows.get_mut(shifted as usize) {
+                *count = count.saturating_add(1);
             }
         }
     }
@@ -124,7 +143,11 @@ pub fn rotate(img: &GrayImage, degrees: f32) -> GrayImage {
             // Inverse rotation: where did this output pixel come from?
             let sx = cos * dx + sin * dy + cx;
             let sy = -sin * dx + cos * dy + cy;
-            if sx < 0.0 || sy < 0.0 || sx >= (w - 1) as f32 || sy >= (h - 1) as f32 {
+            if sx < 0.0
+                || sy < 0.0
+                || sx >= w.saturating_sub(1) as f32
+                || sy >= h.saturating_sub(1) as f32
+            {
                 continue;
             }
             out.put_pixel(x, y, image::Luma([bilinear(img, sx, sy)]));
@@ -134,19 +157,36 @@ pub fn rotate(img: &GrayImage, degrees: f32) -> GrayImage {
 }
 
 fn bilinear(img: &GrayImage, x: f32, y: f32) -> u8 {
+    let (w, h) = img.dimensions();
     let x0 = x.floor() as u32;
     let y0 = y.floor() as u32;
     let fx = x - x0 as f32;
     let fy = y - y0 as f32;
 
-    let p = |px: u32, py: u32| img.get_pixel(px, py).0[0] as f32;
-    let top = p(x0, y0) * (1.0 - fx) + p(x0 + 1, y0) * fx;
-    let bottom = p(x0, y0 + 1) * (1.0 - fx) + p(x0 + 1, y0 + 1) * fx;
+    // `rotate` already bounds its samples to `w - 1` and `h - 1`, so the `+ 1`
+    // neighbours are in range. Clamping here as well means this function cannot
+    // be made to panic by a later caller that does not know that rule — the
+    // sampler is where a rounding error would land, and `get_pixel` panics.
+    let p = |px: u32, py: u32| {
+        img.get_pixel(px.min(w.saturating_sub(1)), py.min(h.saturating_sub(1)))
+            .0[0] as f32
+    };
+    let (x1, y1) = (x0.saturating_add(1), y0.saturating_add(1));
+    let top = p(x0, y0) * (1.0 - fx) + p(x1, y0) * fx;
+    let bottom = p(x0, y1) * (1.0 - fx) + p(x1, y1) * fx;
     (top * (1.0 - fy) + bottom * fy).round().clamp(0.0, 255.0) as u8
 }
 
 #[cfg(test)]
 mod tests {
+    // See the note on the same allow in `route`.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     /// Build a page of horizontal text-like bars.

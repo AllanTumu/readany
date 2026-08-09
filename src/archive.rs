@@ -32,6 +32,15 @@
 //! and the check half is bounded by the cap. That is the price of enforcing a
 //! limit at a boundary that is not where the work happens, and it is worth
 //! stating rather than discovering.
+//!
+//! This module exists to be pointed at hostile input, so the panicking forms
+//! are denied rather than trusted to review. See `docs/security.md`.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 
 use crate::error::{ReadError, Result};
 use crate::limits::{Exceeded, Limits};
@@ -42,7 +51,7 @@ const ZIP_MAGIC: [u8; 2] = *b"PK";
 
 /// Is this plausibly a zip archive?
 pub fn looks_like_zip(bytes: &[u8]) -> bool {
-    bytes.len() >= 4 && bytes[..2] == ZIP_MAGIC
+    bytes.len() >= 4 && bytes.starts_with(&ZIP_MAGIC)
 }
 
 /// Refuse an archive that would decompress past the limits.
@@ -171,7 +180,7 @@ fn check_at_depth(bytes: &[u8], limits: &Limits, depth: u32) -> Result<()> {
             if entry.take(budget as u64).read_to_end(&mut inner).is_err() {
                 continue;
             }
-            check_at_depth(&inner, limits, depth + 1)?;
+            check_at_depth(&inner, limits, depth.saturating_add(1))?;
         }
     }
 
@@ -201,6 +210,15 @@ fn exceeded(e: Exceeded) -> ReadError {
 
 #[cfg(test)]
 mod tests {
+    // See the note on the same allow in `route`: denying these in tests buys
+    // noise, not safety.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
     use std::io::Write;
 

@@ -3,6 +3,15 @@
 //! Routing is separated from reading on purpose. A caller can ask what *would*
 //! happen — which engine, how many pages, how many of them need OCR — in a few
 //! milliseconds, and only then decide whether to spend the money.
+//!
+//! Every byte this module reads was chosen by a stranger, so the panicking
+//! forms are denied here rather than trusted to review. See `docs/security.md`.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 
 use crate::error::{ReadError, Result};
 
@@ -167,14 +176,14 @@ fn sniff_delimited(bytes: &[u8]) -> Option<anydoc::Format> {
 
     for delimiter in *b",;\t|" {
         let counts: Vec<usize> = lines.iter().map(|l| count_outside_quotes(l, delimiter)).collect();
-        let first = counts[0];
+        let Some(&first) = counts.first() else { continue };
         if first == 0 {
             continue;
         }
         let agreeing = counts.iter().filter(|&&c| c == first).count();
         // Every line but one must agree. A ragged file is prose that happens
         // to contain commas, and guessing at it would be worse than saying no.
-        if agreeing + 1 >= counts.len() {
+        if agreeing >= counts.len().saturating_sub(1) {
             return Some(anydoc::Format::Csv);
         }
     }
@@ -183,11 +192,11 @@ fn sniff_delimited(bytes: &[u8]) -> Option<anydoc::Format> {
 
 fn count_outside_quotes(line: &str, delimiter: u8) -> usize {
     let mut inside = false;
-    let mut count = 0;
+    let mut count: usize = 0;
     for b in line.bytes() {
         match b {
             b'"' => inside = !inside,
-            d if d == delimiter && !inside => count += 1,
+            d if d == delimiter && !inside => count = count.saturating_add(1),
             _ => {}
         }
     }
@@ -227,6 +236,16 @@ fn is_image(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    // `unwrap` in a test is an assertion, and indexing a fixture is how a test
+    // says what it expects. Denying them here would produce noise that
+    // discredits the deny above.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     fn png() -> Vec<u8> {

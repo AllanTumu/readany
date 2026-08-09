@@ -1,3 +1,14 @@
+//! Thresholding, on pixels that came from outside.
+//!
+//! Every buffer here is sized from a decoded image's own dimensions, so the
+//! panicking forms are denied. See `docs/security.md`.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
 use super::GrayImage;
 
 /// Otsu's method: pick the threshold that maximises between-class variance.
@@ -5,7 +16,11 @@ use super::GrayImage;
 pub fn otsu_level(img: &GrayImage) -> u8 {
     let mut histogram = [0u64; 256];
     for p in img.pixels() {
-        histogram[p.0[0] as usize] += 1;
+        // A `u8` bucket always lands inside a 256-slot table, but say so
+        // structurally rather than leaving it to be re-derived by a reader.
+        if let Some(count) = histogram.get_mut(usize::from(p.0[0])) {
+            *count = count.saturating_add(1);
+        }
     }
 
     let total: u64 = histogram.iter().sum();
@@ -25,11 +40,13 @@ pub fn otsu_level(img: &GrayImage) -> u8 {
     let mut best_level = 0u8;
 
     for (level, &count) in histogram.iter().enumerate() {
-        weight_background += count;
+        weight_background = weight_background.saturating_add(count);
         if weight_background == 0 {
             continue;
         }
-        let weight_foreground = total - weight_background;
+        // `weight_background` is a running sum of the same table `total` sums,
+        // so it never passes it; saturating states that instead of assuming it.
+        let weight_foreground = total.saturating_sub(weight_background);
         if weight_foreground == 0 {
             break;
         }
@@ -57,7 +74,7 @@ pub fn ink_mask(img: &GrayImage) -> Vec<bool> {
     let mut mask: Vec<bool> = img.pixels().map(|p| p.0[0] <= level).collect();
 
     let ink = mask.iter().filter(|&&b| b).count();
-    if ink * 2 > mask.len() {
+    if ink.saturating_mul(2) > mask.len() {
         // More than half the page is "ink" — the page is light-on-dark.
         for b in mask.iter_mut() {
             *b = !*b;
@@ -68,6 +85,14 @@ pub fn ink_mask(img: &GrayImage) -> Vec<bool> {
 
 #[cfg(test)]
 mod tests {
+    // See the note on the same allow in `route`.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     #[test]

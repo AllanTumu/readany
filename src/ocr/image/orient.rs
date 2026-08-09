@@ -4,6 +4,15 @@
 //! Comparing the two tells us whether to rotate by 90 degrees. Distinguishing
 //! upright from upside down needs a model, so `Orientation::Upright` and
 //! `Orientation::UpsideDown` are only separated once a classifier is wired in.
+//!
+//! Every buffer here is sized from a decoded image's own dimensions, so the
+//! panicking forms are denied. See `docs/security.md`.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 
 use super::binarize::ink_mask;
 use super::deskew::rotate;
@@ -47,13 +56,21 @@ pub fn detect(img: &GrayImage) -> Orientation {
 }
 
 fn axis_variance(mask: &[bool], w: u32, h: u32, by_row: bool) -> f64 {
+    // `chunks` panics on a zero width, and a zero-sided page has no variance to
+    // measure anyway.
+    if w == 0 || h == 0 {
+        return 0.0;
+    }
     let n = if by_row { h } else { w } as usize;
     let mut counts = vec![0u32; n];
-    for y in 0..h {
-        let row = (y as usize) * (w as usize);
-        for x in 0..w {
-            if mask[row + x as usize] {
-                counts[if by_row { y as usize } else { x as usize }] += 1;
+    // Walking the mask a row at a time replaces the flattened `y * w + x`, so
+    // there is no offset left to get wrong and no bound left to re-derive.
+    for (y, row) in mask.chunks(w as usize).enumerate().take(h as usize) {
+        for (x, &inked) in row.iter().enumerate() {
+            if inked {
+                if let Some(count) = counts.get_mut(if by_row { y } else { x }) {
+                    *count = count.saturating_add(1);
+                }
             }
         }
     }
@@ -86,13 +103,15 @@ pub fn apply(img: &GrayImage, orientation: Orientation) -> GrayImage {
 fn rotate_quarter(img: &GrayImage, clockwise: bool) -> GrayImage {
     let (w, h) = img.dimensions();
     let mut out = GrayImage::new(h, w);
-    for y in 0..h {
-        for x in 0..w {
+    // Zipping each axis against its own reverse gives `h - 1 - y` and
+    // `w - 1 - x` without subtracting, so neither can be made to wrap.
+    for (y, mirrored_y) in (0..h).zip((0..h).rev()) {
+        for (x, mirrored_x) in (0..w).zip((0..w).rev()) {
             let p = *img.get_pixel(x, y);
             if clockwise {
-                out.put_pixel(h - 1 - y, x, p);
+                out.put_pixel(mirrored_y, x, p);
             } else {
-                out.put_pixel(y, w - 1 - x, p);
+                out.put_pixel(y, mirrored_x, p);
             }
         }
     }
@@ -101,6 +120,14 @@ fn rotate_quarter(img: &GrayImage, clockwise: bool) -> GrayImage {
 
 #[cfg(test)]
 mod tests {
+    // See the note on the same allow in `route`.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     fn upright_text() -> GrayImage {

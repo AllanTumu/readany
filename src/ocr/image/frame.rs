@@ -14,6 +14,15 @@
 //! and smooth means low contrast inside a small window however dark it gets.
 //! Measuring contrast in an 8-pixel cell therefore finds ink and ignores both
 //! the background and the lighting.
+//!
+//! Every buffer here is sized from a decoded image's own dimensions, so the
+//! panicking forms are denied. See `docs/security.md`.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 
 use super::GrayImage;
 
@@ -33,6 +42,32 @@ const MARGIN: f32 = 0.02;
 const MIN_AREA: f32 = 0.02;
 /// Above this share there is nothing to crop and we should not pretend.
 const MAX_AREA: f32 = 0.92;
+
+/// Where cell `(cx, cy)` lives in a `cols`-wide mask, or `None` when that
+/// offset does not fit a `usize`.
+fn cell_index(cx: u32, cy: u32, cols: u32) -> Option<usize> {
+    (cy as usize)
+        .checked_mul(cols as usize)?
+        .checked_add(cx as usize)
+}
+
+/// Is cell `(cx, cy)` set? Cells outside the mask read as unset, which is what
+/// every caller here wants at a border.
+fn cell(mask: &[bool], cx: u32, cy: u32, cols: u32) -> bool {
+    cell_index(cx, cy, cols)
+        .and_then(|i| mask.get(i))
+        .copied()
+        .unwrap_or(false)
+}
+
+/// Step `delta` cells from `at`, or `None` if that leaves `0..limit`.
+///
+/// This replaces casting the whole grow loop through `i32` to make a negative
+/// neighbour representable. The bounds check and the sign live in one place.
+fn offset(at: u32, delta: i32, limit: u32) -> Option<u32> {
+    let moved = u32::try_from((at as i64).checked_add(delta as i64)?).ok()?;
+    (moved < limit).then_some(moved)
+}
 
 /// Where the document is, as `(x, y, width, height)` in the image's own
 /// pixels. `None` means nothing document-shaped was found and the caller
@@ -55,37 +90,40 @@ pub fn content_bounds(img: &GrayImage) -> Option<(u32, u32, u32, u32)> {
     }
 
     // One pass: does this cell contain ink?
-    let mut ink = vec![false; (cols * rows) as usize];
+    let mut ink = vec![false; (cols as usize).saturating_mul(rows as usize)];
     for cy in 0..rows {
+        let y_start = cy.saturating_mul(CELL);
         for cx in 0..cols {
+            let x_start = cx.saturating_mul(CELL);
             let (mut lo, mut hi) = (255u8, 0u8);
-            for y in cy * CELL..(cy + 1) * CELL {
-                for x in cx * CELL..(cx + 1) * CELL {
+            for y in y_start..y_start.saturating_add(CELL) {
+                for x in x_start..x_start.saturating_add(CELL) {
                     let v = small.get_pixel(x, y).0[0];
                     lo = lo.min(v);
                     hi = hi.max(v);
                 }
             }
-            ink[(cy * cols + cx) as usize] = hi.saturating_sub(lo) >= INK_CONTRAST;
+            if let Some(slot) = cell_index(cx, cy, cols).and_then(|i| ink.get_mut(i)) {
+                *slot = hi.saturating_sub(lo) >= INK_CONTRAST;
+            }
         }
     }
 
     // Grow, so one receipt is one region rather than one region per line.
     let mut grown = vec![false; ink.len()];
-    for cy in 0..rows as i32 {
-        for cx in 0..cols as i32 {
-            'cell: for dy in -BRIDGE..=BRIDGE {
-                for dx in -BRIDGE..=BRIDGE {
-                    let (nx, ny) = (cx + dx, cy + dy);
-                    if nx >= 0
-                        && ny >= 0
-                        && nx < cols as i32
-                        && ny < rows as i32
-                        && ink[(ny * cols as i32 + nx) as usize]
-                    {
-                        grown[(cy * cols as i32 + cx) as usize] = true;
-                        break 'cell;
+    for cy in 0..rows {
+        for cx in 0..cols {
+            let near_ink = (-BRIDGE..=BRIDGE).any(|dy| {
+                (-BRIDGE..=BRIDGE).any(|dx| {
+                    match (offset(cx, dx, cols), offset(cy, dy, rows)) {
+                        (Some(nx), Some(ny)) => cell(&ink, nx, ny, cols),
+                        _ => false,
                     }
+                })
+            });
+            if near_ink {
+                if let Some(slot) = cell_index(cx, cy, cols).and_then(|i| grown.get_mut(i)) {
+                    *slot = true;
                 }
             }
         }
@@ -102,13 +140,12 @@ pub fn content_bounds(img: &GrayImage) -> Option<(u32, u32, u32, u32)> {
     let mut count = 0u32;
     for cy in 0..rows {
         for cx in 0..cols {
-            let i = (cy * cols + cx) as usize;
-            if best[i] && ink[i] {
+            if cell(&best, cx, cy, cols) && cell(&ink, cx, cy, cols) {
                 x0 = x0.min(cx);
                 y0 = y0.min(cy);
                 x1 = x1.max(cx);
                 y1 = y1.max(cy);
-                count += 1;
+                count = count.saturating_add(1);
             }
         }
     }
@@ -119,10 +156,10 @@ pub fn content_bounds(img: &GrayImage) -> Option<(u32, u32, u32, u32)> {
     // Back to the caller's pixels, with a margin.
     let inv = 1.0 / scale;
     let pad = (w.max(h) as f32 * MARGIN).round();
-    let fx0 = ((x0 * CELL) as f32 * inv - pad).max(0.0);
-    let fy0 = ((y0 * CELL) as f32 * inv - pad).max(0.0);
-    let fx1 = (((x1 + 1) * CELL) as f32 * inv + pad).min(w as f32);
-    let fy1 = (((y1 + 1) * CELL) as f32 * inv + pad).min(h as f32);
+    let fx0 = (x0.saturating_mul(CELL) as f32 * inv - pad).max(0.0);
+    let fy0 = (y0.saturating_mul(CELL) as f32 * inv - pad).max(0.0);
+    let fx1 = (x1.saturating_add(1).saturating_mul(CELL) as f32 * inv + pad).min(w as f32);
+    let fy1 = (y1.saturating_add(1).saturating_mul(CELL) as f32 * inv + pad).min(h as f32);
 
     let (bw, bh) = ((fx1 - fx0) as u32, (fy1 - fy0) as u32);
     if bw == 0 || bh == 0 {
@@ -138,40 +175,63 @@ pub fn content_bounds(img: &GrayImage) -> Option<(u32, u32, u32, u32)> {
 
 /// Flood fill, four-connected, returning the largest group as a mask.
 fn largest_group(mask: &[bool], cols: u32, rows: u32) -> Option<Vec<bool>> {
+    // A zero-wide grid has no groups, and `i % cols` below would divide by it.
+    // The caller already refuses fewer than four columns; this is so the
+    // function cannot be made to panic by a later one that does not.
+    if cols == 0 || rows == 0 {
+        return None;
+    }
     let mut seen = vec![false; mask.len()];
     let mut best: Option<(usize, Vec<bool>)> = None;
     let mut stack: Vec<u32> = Vec::new();
 
     for start in 0..mask.len() {
-        if seen[start] || !mask[start] {
+        let unvisited_ink =
+            !seen.get(start).copied().unwrap_or(true) && mask.get(start).copied().unwrap_or(false);
+        if !unvisited_ink {
             continue;
         }
+        let Ok(start_cell) = u32::try_from(start) else {
+            continue;
+        };
         let mut group = vec![false; mask.len()];
         let mut size = 0usize;
-        seen[start] = true;
-        stack.push(start as u32);
+        if let Some(s) = seen.get_mut(start) {
+            *s = true;
+        }
+        stack.push(start_cell);
 
         while let Some(i) = stack.pop() {
-            group[i as usize] = true;
-            size += 1;
-            let (x, y) = (i % cols, i / cols);
-            let push = |j: u32, seen: &mut Vec<bool>, stack: &mut Vec<u32>| {
-                if !seen[j as usize] && mask[j as usize] {
-                    seen[j as usize] = true;
-                    stack.push(j);
-                }
+            if let Some(g) = group.get_mut(i as usize) {
+                *g = true;
+            }
+            size = size.saturating_add(1);
+            // `cols` is non-zero, so neither of these can divide by zero; the
+            // checked forms say so without a reader having to go and look.
+            let (Some(x), Some(y)) = (i.checked_rem(cols), i.checked_div(cols)) else {
+                continue;
             };
-            if x > 0 {
-                push(i - 1, &mut seen, &mut stack);
+            let push = |j: u32, seen: &mut Vec<bool>, stack: &mut Vec<u32>| {
+                let at = j as usize;
+                if seen.get(at).copied().unwrap_or(true) || !mask.get(at).copied().unwrap_or(false) {
+                    return;
+                }
+                if let Some(s) = seen.get_mut(at) {
+                    *s = true;
+                }
+                stack.push(j);
+            };
+            if let (true, Some(j)) = (x > 0, i.checked_sub(1)) {
+                push(j, &mut seen, &mut stack);
             }
-            if x + 1 < cols {
-                push(i + 1, &mut seen, &mut stack);
+            if let (true, Some(j)) = (x.saturating_add(1) < cols, i.checked_add(1)) {
+                push(j, &mut seen, &mut stack);
             }
-            if y > 0 {
-                push(i - cols, &mut seen, &mut stack);
+            if let (true, Some(j)) = (y > 0, i.checked_sub(cols)) {
+                push(j, &mut seen, &mut stack);
             }
-            if y + 1 < rows {
-                push(i + cols, &mut seen, &mut stack);
+            if let (true, Some(j)) = (y.saturating_add(1) < rows, i.checked_add(cols)) {
+                push(j, &mut seen, &mut stack);
             }
         }
         if best.as_ref().is_none_or(|(n, _)| size > *n) {
@@ -183,6 +243,14 @@ fn largest_group(mask: &[bool], cols: u32, rows: u32) -> Option<Vec<bool>> {
 
 #[cfg(test)]
 mod tests {
+    // See the note on the same allow in `route`.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     /// Paint a block that looks like print: dark bands the height of a line
