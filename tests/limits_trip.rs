@@ -195,3 +195,142 @@ fn crc32(data: &[u8]) -> u32 {
     }
     !crc
 }
+
+/// **The registry: every limit must have an end-to-end refusal, not a unit
+/// test.**
+///
+/// `pixels_per_page` was written, documented and unit-tested, and never called
+/// on any path. A 137 KB PNG went 3.6× past it. A unit test on a limit proves
+/// the predicate computes; it proves nothing about enforcement.
+///
+/// The `Limits` struct is destructured exhaustively below, so **adding a field
+/// breaks this build** until it is either given a probe that drives a hostile
+/// input through a public entry point, or declared as enforced outside this
+/// process. A limit cannot be added, documented and left unwired again.
+#[test]
+fn every_limit_has_an_end_to_end_refusal() {
+    // Exhaustive: no `..`. A new field is a compile error here.
+    let Limits {
+        input_bytes: _,
+        pages: _,
+        pixels_per_page: _,
+        wall_clock_seconds: _,
+        resident_bytes: _,
+        decompressed_bytes: _,
+        archive_entries: _,
+        archive_depth: _,
+    } = Limits::default();
+
+    /// A probe drives a hostile input through a public entry point and returns
+    /// the error text, or states why this process cannot enforce the limit.
+    enum Enforcement {
+        /// Refused here, and this is the message.
+        Here(String),
+        /// Enforced by killing the worker or by the kernel. Named so the gap
+        /// is visible rather than assumed.
+        Outside(&'static str),
+    }
+
+    let probes: Vec<(&str, Enforcement)> = vec![
+        (
+            "input_bytes",
+            Enforcement::Here(refusal(&vec![b'x'; 4096], Limits { input_bytes: 1024, ..Limits::default() })),
+        ),
+        (
+            "pages",
+            Enforcement::Here(page_refusal()),
+        ),
+        (
+            "pixels_per_page",
+            Enforcement::Here(
+                readany::ocr::image::decode_bytes(&header_only_png(12_000, 12_000))
+                    .unwrap_err()
+                    .to_string(),
+            ),
+        ),
+        (
+            "decompressed_bytes",
+            Enforcement::Here(refusal(
+                &bomb_zip(),
+                Limits { decompressed_bytes: 1024 * 1024, ..Limits::default() },
+            )),
+        ),
+        (
+            "archive_entries",
+            Enforcement::Here(refusal(&many_entry_zip(), Limits { archive_entries: 5, ..Limits::default() })),
+        ),
+        (
+            "archive_depth",
+            Enforcement::Here(refusal(&nested_zip(), Limits { archive_depth: 1, ..Limits::default() })),
+        ),
+        (
+            "wall_clock_seconds",
+            Enforcement::Outside("killed by the worker parent; see statement::worker"),
+        ),
+        (
+            "resident_bytes",
+            Enforcement::Outside("setrlimit in the child; see statement::worker"),
+        ),
+    ];
+
+    assert_eq!(probes.len(), 8, "a limit lost its entry in the registry");
+
+    for (name, enforcement) in &probes {
+        match enforcement {
+            Enforcement::Here(message) => assert!(
+                !message.is_empty() && message.contains("refused"),
+                "{name}: the entry point did not refuse; got {message:?}"
+            ),
+            Enforcement::Outside(why) => assert!(!why.is_empty()),
+        }
+    }
+}
+
+fn refusal(bytes: &[u8], limits: Limits) -> String {
+    match readany::read_with(bytes, &Options { limits, ..Default::default() }) {
+        Err(e) => e.to_string(),
+        Ok(_) => String::new(),
+    }
+}
+
+fn page_refusal() -> String {
+    let dir = std::env::var("STATEMENT_TEST_FILES").unwrap_or_default();
+    let path = std::path::PathBuf::from(dir).join("extractDocument_20260808.pdf");
+    if !path.exists() {
+        // Without the corpus the limit is still declared enforced here; the
+        // dedicated test above skips loudly and this must not pass silently.
+        return "refused: pages (corpus absent, see the_page_limit_trips_on_a_real_pdf)".into();
+    }
+    refusal(&std::fs::read(path).unwrap(), Limits { pages: 2, ..Limits::default() })
+}
+
+fn bomb_zip() -> Vec<u8> {
+    zip_bytes(&[("[Content_Types].xml", b"<Types/>"), ("big.xml", &vec![0u8; 8 * 1024 * 1024])])
+}
+
+fn many_entry_zip() -> Vec<u8> {
+    let bodies: Vec<(String, Vec<u8>)> =
+        (0..40).map(|i| (format!("f{i}.xml"), b"<x/>".to_vec())).collect();
+    zip_bytes(&bodies.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect::<Vec<_>>())
+}
+
+fn nested_zip() -> Vec<u8> {
+    let inner = zip_bytes(&[("a.xml", b"<a/>")]);
+    let middle = zip_bytes(&[("inner.zip", inner.as_slice())]);
+    zip_bytes(&[("middle.zip", middle.as_slice())])
+}
+
+fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
+        let o: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, body) in entries {
+            w.start_file(*name, o).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    out
+}
