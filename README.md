@@ -97,7 +97,7 @@ Skew of exactly 7.0 degrees was measured as 7.10. A page turned on its side was 
 
 ## Reading an actual receipt
 
-Measured with a PP-OCRv4 backend behind the traits. The output, verbatim, from a photographed shop receipt on CPU:
+Measured with the **Chinese** `ch_PP-OCRv4_rec` recogniser and `ppocr_keys_v1.txt` behind the traits — the `6624 characters` in the run below is that dictionary's own size, and is the record of which model produced every figure on this page. The receipt is Ugandan and its text is pure ASCII, which is why a Chinese dictionary read it at all; on a euro receipt the same model silently drops the `€`. See `readany-ocr/src/expect.rs`. The output, verbatim, from a photographed shop receipt on CPU:
 
 ```
 $ cargo run --release --features onnx --example read_scan -- \
@@ -133,6 +133,8 @@ On a page tilted 7 degrees, measured with Levenshtein distance against the groun
 | Resampled twice | 86.8% | 2 of 8 |
 | **Cropped from the original** | **93.9%** | **4 of 8** |
 
+Both rows were measured with the Chinese `ch_PP-OCRv4_rec` recogniser, on an ASCII-only Ugandan receipt. The comparison between them is sound — one model, one image, one variable — but neither number describes the Latin recogniser this project ships, and neither should be quoted for European documents. Re-measured on `sk-bench/receipt.jpg` on 10 August 2026 with the detector and settings held constant, both recognisers found the same 19 lines and 39 boxes; mean confidence was **0.949 with Chinese PP-OCRv4** and **0.993 with Latin PP-OCRv5**, at 830 ms and 767 ms. Character accuracy against ground truth has not been re-measured, because the ground truth for that image is not in this repository.
+
 Errors cut by 53%. `OUICXMART` became `QUICKMART`, `MitkZL8.500` became `Milk2L8.500`, and `TOTAL T8,700` became `TOTAL 18,700` — the figure that actually matters on a receipt. Confidence rose from 0.92 to 0.95. The clean and sideways pages improved too: `Kampela` is now read correctly as `Kampala`.
 
 ## Status
@@ -161,7 +163,9 @@ Errors cut by 53%. `OUICXMART` became `QUICKMART`, `MitkZL8.500` became `Milk2L8
 
 **No PDF rasteriser bundled.** Turning a scanned PDF page into pixels needs a renderer with heavy native dependencies. Rather than force that on every user, those pages are reported as unresolved and the caller supplies images. Honest beats convenient.
 
-**No bundled model weights.** crates.io caps a package at 10 MB and several language heads are needed. Models are fetched on first use, verified by SHA-256, cached under `ANYSCAN_HOME`.
+**No bundled model weights.** crates.io caps a package at 10 MB and several language heads are needed. Models are resolved from `ANYSCAN_HOME` and verified by SHA-256 against a declared spec before use — `ocr::models::resolve`.
+
+> **Corrected 10 August 2026.** This paragraph said models were "fetched on first use, verified by SHA-256". Nothing fetched and nothing verified: `ocr::models::resolve` had no caller anywhere in this crate or any crate using it, and `~/.cache/anyscan` did not exist on the machine that wrote the sentence. Verification is now really performed, in `readany-ocr`, which refuses to open a recogniser whose file is not the declared model or whose dictionary cannot spell the characters it was opened to read. A document describing a defence that does not exist is worse than one that omits it, because it stops anyone looking.
 
 ## Architecture
 

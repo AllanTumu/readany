@@ -33,6 +33,38 @@ pub enum ScanError {
         found: String,
     },
 
+    /// The file loaded is intact, and is not the model the caller declared —
+    /// either a different model, or one that cannot do what it was opened in
+    /// order to do.
+    ///
+    /// Distinct from [`ScanError::ModelCorrupt`], which means *the right file,
+    /// damaged*. This means *the wrong file, perfectly intact*, and that is
+    /// the more dangerous of the two: a damaged model does not load, and a
+    /// wrong one reads.
+    ///
+    /// What its absence cost: this project's documentation claimed Latin
+    /// PP-OCRv5 recognition from the day it was written, while every machine
+    /// that ever ran it held the **Chinese** PP-OCRv4 recogniser and its
+    /// dictionary. A Chinese PaddleOCR dictionary carries the whole ASCII
+    /// range, so nothing crashed and nothing came back empty — it returned
+    /// plausible Latin text with no way at all to spell `€`, for months, and
+    /// every published OCR figure was measured through it. A wrong model is
+    /// worse than a missing one, because the missing one stops the run and the
+    /// wrong one writes a number into a document.
+    ///
+    /// `check` names which guarantee broke, so the message says what was
+    /// wanted and what was actually there rather than only that something was.
+    /// `expected` and `found` are both required for the same reason: a refusal
+    /// that does not name the file it actually found sends the reader to the
+    /// wrong machine.
+    #[error("model {name}: {check} — expected {expected}, found {found}")]
+    ModelNotAsDeclared {
+        name: String,
+        check: &'static str,
+        expected: String,
+        found: String,
+    },
+
     #[error("inference failed: {0}")]
     Inference(String),
 }
