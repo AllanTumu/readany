@@ -1,0 +1,139 @@
+name: Release
+
+# Replaces `publish-npm.yml`, which built the package and published it without
+# running a single test, and covered only npm while crates.io was always done
+# by hand. It also never worked: both the v0.1.0 and v0.2.0 runs failed at
+# `npm publish` on an invalid token, while the release itself went out from a
+# laptop. A workflow that cannot publish, and goes red when the release
+# succeeded, is worse than no workflow — it teaches you to ignore the result.
+#
+# One job on purpose. Verification and publication share the same working
+# directory and therefore the same artefact: a two-job version would rebuild,
+# and then what was tested and what was published are two different files.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and verify, publish nothing"
+        type: boolean
+        default: true
+
+env:
+  # No runner can hold the corpus — those are real financial documents and are
+  # never committed. The absence has to be declared, or the tests that read
+  # them fail instead of skipping.
+  STATEMENT_CORPUS_ABSENT: 1
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-unknown-unknown, components: clippy }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, registry-url: "https://registry.npmjs.org" }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-pack --locked
+
+      # ---------------------------------------------------------------------
+      # Verify. Nothing below this block publishes anything.
+      # ---------------------------------------------------------------------
+
+      - name: The tag must name the version being released
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION="$(./scripts/version.sh --print)"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml $VERSION"
+            exit 1
+          fi
+          echo "releasing $VERSION"
+
+      - run: ./scripts/version.sh --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --manifest-path wasm/Cargo.toml --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo test --release
+
+      # Builds both targets, regenerates the third-party licences, asserts one
+      # version across every manifest, and refuses to finish if a build-machine
+      # path survived into the blob.
+      - run: ./scripts/build-wasm.sh
+
+      # The binding is the artefact npm receives, and `cargo check` passes
+      # whatever it does. This is the only thing that watches it.
+      - run: node wasm/test/binding.test.js
+
+      - name: No document data in the blob
+        run: |
+          strings -a pkg/readany_wasm_bg.wasm > /tmp/blob.txt
+          fail=0
+          check() {
+            n=$(grep -cE "$2" /tmp/blob.txt || true)
+            printf '  %-34s %s\n' "$1" "$n"
+            [ "$n" = "0" ] || fail=1
+          }
+          check "IBAN-shaped"        '\b[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}\b'
+          check "card-shaped"        '\b[0-9]{13,19}\b'
+          check "money-shaped"       '[€$£¥][0-9]+[.,][0-9]{2}'
+          check "email-shaped"       '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+          check "build-machine paths" '/Users/|/home/|C:\\'
+          [ "$fail" = "0" ] || { echo "::error::something document-shaped is in the blob"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: readany-package
+          path: pkg/
+          retention-days: 14
+
+      # ---------------------------------------------------------------------
+      # Publish. Each registry is checked first, so re-running a release that
+      # got half way through finishes it rather than failing on the half that
+      # already succeeded. That is not hypothetical: 0.2.0 reached npm and
+      # stalled before crates.io, and the only way forward was by hand.
+      # ---------------------------------------------------------------------
+
+      - name: Publish to crates.io
+        if: ${{ !inputs.dry_run }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          VERSION="$(./scripts/version.sh --print)"
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set. See RELEASING.md."
+            exit 1
+          fi
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "User-Agent: readany-release" \
+            "https://crates.io/api/v1/crates/readany/$VERSION")
+          if [ "$CODE" = "200" ]; then
+            echo "crates.io already has $VERSION, nothing to do"
+          else
+            cargo publish
+          fi
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # An absolute path: this step runs in pkg/, where ./scripts does not
+          # exist. npm publish has to run from the package directory, so the
+          # script cannot be reached relatively.
+          VERSION="$("$GITHUB_WORKSPACE/scripts/version.sh" --print)"
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN is not set. See RELEASING.md."
+            exit 1
+          fi
+          if npm view "readany@$VERSION" version >/dev/null 2>&1; then
+            echo "npm already has $VERSION, nothing to do"
+          else
+            npm publish --access public
+          fi
+        working-directory: pkg

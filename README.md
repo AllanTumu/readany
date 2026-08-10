@@ -319,10 +319,11 @@ runtime, so a page of pixels comes back in `unresolved_pages`. `npm/README.md`
 says so in its first paragraph, because that is the sentence a person installing
 the package needs before any other.
 
-Built and published by `scripts/build-wasm.sh`, which also enforces one version
-number across `Cargo.toml`, `wasm/Cargo.toml`, `npm/package.json` and the
-generated `pkg/package.json`. `wasm/src/lib.rs` refuses to compile if the first
-two disagree. Size, and what each switch bought, is in `docs/wasm-size.md`.
+Built by `scripts/build-wasm.sh`, which also enforces one version number across
+`Cargo.toml`, `wasm/Cargo.toml`, `npm/package.json` and the generated
+`pkg/package.json`. `wasm/src/lib.rs` refuses to compile if the first two
+disagree. Size, and what each switch bought, is in `docs/wasm-size.md`;
+how a release is cut is in `RELEASING.md`.
 
 ## Design decisions
 

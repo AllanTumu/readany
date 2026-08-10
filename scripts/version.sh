@@ -18,6 +18,7 @@
 #
 #   ./scripts/version.sh            stamp npm/package.json from Cargo.toml
 #   ./scripts/version.sh --check    fail on any disagreement, change nothing
+#   ./scripts/version.sh --print    print the crate version and nothing else
 #
 set -euo pipefail
 
@@ -36,6 +37,16 @@ read_cargo_version() {
 }
 
 CRATE=$(read_cargo_version Cargo.toml)
+
+# `--print` exists so the release workflow has one parser to trust rather than
+# a second `grep version` of its own. It runs before the node checks below,
+# because a machine asking "what version is this" should not need node
+# installed to find out.
+if [ "${1:-}" = "--print" ]; then
+  printf '%s\n' "$CRATE"
+  exit 0
+fi
+
 WASM=$(read_cargo_version wasm/Cargo.toml)
 NPM=$(node -p "require('./npm/package.json').version")
 
