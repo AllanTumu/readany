@@ -3,7 +3,7 @@
 //! Straightening a page and then cropping from the straightened copy resamples
 //! every glyph twice: once for the rotation, once for the crop. Two passes of
 //! bilinear blur measurably hurts recognition — on a 7 degree tilt it turned
-//! `QUICKMART` into `OUICXMART`.
+//! `NORTHGATE` into `NORTHCATE`.
 //!
 //! So detection runs on the straightened page, where it is easy, but the crops
 //! handed to the recogniser are sampled straight from the original image

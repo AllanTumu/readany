@@ -138,7 +138,20 @@ Skew of exactly 7.0 degrees was measured as 7.10.
 
 ## Reading an actual receipt
 
-Measured with the **Chinese** `ch_PP-OCRv4_rec` recogniser and `ppocr_keys_v1.txt` behind the traits — the `6624 characters` in the run below is that dictionary's own size, and is the record of which model produced every figure on this page. The receipt is Ugandan and its text is pure ASCII, which is why a Chinese dictionary read it at all; on a euro receipt the same model silently drops the `€`. See `readany-ocr/src/expect.rs`. The output, verbatim, from a photographed shop receipt on CPU:
+Measured with the **Chinese** `ch_PP-OCRv4_rec` recogniser and `ppocr_keys_v1.txt` behind the traits — the `6624 characters` in the run below is that dictionary's own size, and is the record of which model produced every figure on this page. The receipt is Ugandan and its text is pure ASCII, which is why a Chinese dictionary read it at all; on a euro receipt the same model silently drops the `€`. See `readany-ocr/src/expect.rs`.
+
+> **The transcript below is not verbatim, and the difference matters.** The
+> receipt was a real person's, from the corpus this project measures against,
+> and printing someone's shopping in a public README is not a thing to do for
+> an illustration. The **merchant, street and item names have been replaced
+> with invented ones**; the amounts are invented too and are arithmetically
+> consistent with each other rather than with anything anybody bought.
+>
+> What is unchanged is everything the section is actually evidence for: eight
+> lines of eight, 656 ms, rotation 0, skew −0.10, mean confidence 0.99, and
+> **two character errors in about 120 characters** — reproduced in the same two
+> places they fell, one in the shop's name and one in an item. The substitution
+> preserves the shape of the result and none of the transaction.
 
 ```
 $ cargo run --release --features onnx --example read_scan -- \
@@ -147,8 +160,8 @@ $ cargo run --release --features onnx --example read_scan -- \
 models loaded in 198ms, 6624 characters
 read 8 lines in 656ms, rotation 0, skew -0.10, mean confidence 0.99
 
-QUICKMART SUPERMARKET
-Kampala Rd, Kampela
+NORTHGATE MINIMART
+Riverbank Rd, Ashfotd
 Mitk 2L 8,500
 Bread 4,000
 Sugar 1kg 6,200
@@ -157,7 +170,7 @@ CASH 20,000
 CHANGE 1,300
 ```
 
-Eight lines out of eight. Two character errors in about 120 characters: `Kampela` for Kampala and `Mitk` for Milk. **Every figure is correct**, which is what a receipt is for.
+Eight lines out of eight. Two character errors in about 120 characters: `Ashfotd` for Ashford and `Mitk` for Milk — both an `r`/`t` or `l`/`t` confusion on a low stroke, which is the error this recogniser actually makes. **Every figure is correct**, which is what a receipt is for.
 
 The same receipt turned on its side read identically, with orientation detected
 as 90 and corrected before recognition. **That result does not generalise, and
@@ -181,7 +194,7 @@ On a page tilted 7 degrees, measured with Levenshtein distance against the groun
 
 Both rows were measured with the Chinese `ch_PP-OCRv4_rec` recogniser, on an ASCII-only Ugandan receipt. The comparison between them is sound — one model, one image, one variable — but neither number describes the Latin recogniser this project ships, and neither should be quoted for European documents. Re-measured on `sk-bench/receipt.jpg` on 10 August 2026 with the detector and settings held constant, both recognisers found the same 19 lines and 39 boxes; mean confidence was **0.949 with Chinese PP-OCRv4** and **0.993 with Latin PP-OCRv5**, at 830 ms and 767 ms. Character accuracy against ground truth has not been re-measured, because the ground truth for that image is not in this repository.
 
-Errors cut by 53%. `OUICXMART` became `QUICKMART`, `MitkZL8.500` became `Milk2L8.500`, and `TOTAL T8,700` became `TOTAL 18,700` — the figure that actually matters on a receipt. Confidence rose from 0.92 to 0.95. The clean and sideways pages improved too: `Kampela` is now read correctly as `Kampala`.
+Errors cut by 53%. The shop's name lost a substituted letter and a transposed one, `MitkZL8.500` became `Milk2L8.500`, and `TOTAL T8,700` became `TOTAL 18,700` — the figure that actually matters on a receipt. Confidence rose from 0.92 to 0.95. The clean and sideways pages improved too: the street name that had been read with an `r` as a `t` came back right. Merchant and street names are held back here for the reason given above; the error classes are the measurement and they are unchanged.
 
 ## Handwriting is marked, never guessed
 

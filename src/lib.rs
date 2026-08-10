@@ -472,7 +472,7 @@ mod tests {
 
     #[test]
     fn an_image_with_an_ocr_backend_is_read() {
-        let backend = StubOcr("QUICKMART SUPERMARKET");
+        let backend = StubOcr("NORTHGATE MINIMART");
         let doc = read_with(
             &png(),
             &Options {
@@ -481,7 +481,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(doc.markdown.contains("QUICKMART SUPERMARKET"));
+        assert!(doc.markdown.contains("NORTHGATE MINIMART"));
         assert_eq!(doc.ocr_pages, vec![1]);
         assert!(doc.is_complete());
         assert_eq!(doc.pages[0].origin, Origin::Ocr);
