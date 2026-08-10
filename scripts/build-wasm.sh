@@ -91,11 +91,16 @@ fi
 
 # The blob must carry no path that says anything about the machine that built
 # it: not the user's name, not the home directory, not the layout above the
-# project. `$HOME` is checked literally as well as by shape, because a username
-# that happens to look like a crate name would slip through a pattern.
+# project.
+#
+# The username is matched **only as a path segment**. Grepping for it bare was
+# the first spelling and it is a trap on CI, where the user is called `runner`
+# — an ordinary English word that could appear in any string table, failing the
+# release for nothing. A check that cries wolf gets disabled, and then it is
+# not a check.
 echo "==> checking the blob for build-machine paths"
 LEAKED=$(strings -a pkg/readany_wasm_bg.wasm \
-  | grep -cE "$HOME|/Users/|/home/|$(id -un)" || true)
+  | grep -cE "$HOME|/Users/|/home/|/$(id -un)/" || true)
 if [ "$LEAKED" != "0" ]; then
   echo "build-wasm.sh: $LEAKED build-machine paths survived --remap-path-prefix" >&2
   strings -a pkg/readany_wasm_bg.wasm \
