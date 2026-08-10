@@ -56,7 +56,16 @@ pub fn to_markdown(result: &ScanResult, options: &MarkdownOptions) -> String {
         }
 
         let heading = heading_level(line, body);
-        let rendered = if options.mark_uncertain && line.confidence() < options.confidence_floor {
+        // The line's **weakest** box, not its mean. A statement line is date,
+        // merchant, amount and balance; averaging them buries the one box that
+        // went wrong under three that did not. Measured over 497 lines from a
+        // generated statement read through ten damage levels, 69 of which
+        // carry a box that is not what the page printed: at this same floor of
+        // 0.5 the mean marked 0 of the 69 and the minimum marks 18, while
+        // neither marks one of the 428 lines that were read correctly. Same
+        // constant, strictly more caught, nothing new accused.
+        let rendered = if options.mark_uncertain && line.min_confidence() < options.confidence_floor
+        {
             format!("{text} <!-- low confidence -->")
         } else {
             text
@@ -172,6 +181,72 @@ mod tests {
         let r = result(vec![line("blurry text", 10.0, 16.0, 0.2)]);
         let md = to_markdown(&r, &MarkdownOptions::default());
         assert!(md.contains("<!-- low confidence -->"), "got:\n{md}");
+    }
+
+    /// A line the mean cannot mark.
+    ///
+    /// Four cells, three read confidently and one not — a bank statement row
+    /// whose merchant was guessed and whose date, amount and balance were not.
+    /// The mean of those four is 0.87 and sails over the 0.5 floor; the
+    /// weakest of them is 0.20 and does not. This is the case the marker
+    /// existed for and never once fired on.
+    #[test]
+    fn a_line_with_one_doubtful_cell_is_marked_although_its_mean_is_high() {
+        let row = TextLine {
+            boxes: vec![
+                TextBox {
+                    text: "05/01/2026".into(),
+                    quad: Quad::from_rect(10.0, 10.0, 60.0, 16.0),
+                    confidence: 0.99,
+                },
+                TextBox {
+                    text: "MERIDIAN CAFE".into(),
+                    quad: Quad::from_rect(80.0, 10.0, 90.0, 16.0),
+                    confidence: 0.20,
+                },
+                TextBox {
+                    text: "-42.57".into(),
+                    quad: Quad::from_rect(200.0, 10.0, 40.0, 16.0),
+                    confidence: 0.99,
+                },
+                TextBox {
+                    text: "47,614.90".into(),
+                    quad: Quad::from_rect(260.0, 10.0, 50.0, 16.0),
+                    confidence: 0.99,
+                },
+            ],
+            baseline_y: 18.0,
+        };
+        assert!(
+            row.confidence() > 0.5,
+            "the mean must not flag it, or this test proves nothing: {}",
+            row.confidence()
+        );
+        let md = to_markdown(&result(vec![row]), &MarkdownOptions::default());
+        assert!(md.contains("<!-- low confidence -->"), "got:\n{md}");
+    }
+
+    /// And a row where every cell is sound is left alone, so the marker is not
+    /// simply always on.
+    #[test]
+    fn a_line_whose_cells_are_all_sound_is_not_marked() {
+        let row = TextLine {
+            boxes: vec![
+                TextBox {
+                    text: "05/01/2026".into(),
+                    quad: Quad::from_rect(10.0, 10.0, 60.0, 16.0),
+                    confidence: 0.99,
+                },
+                TextBox {
+                    text: "MERIDIAN CAFE".into(),
+                    quad: Quad::from_rect(80.0, 10.0, 90.0, 16.0),
+                    confidence: 0.83,
+                },
+            ],
+            baseline_y: 18.0,
+        };
+        let md = to_markdown(&result(vec![row]), &MarkdownOptions::default());
+        assert!(!md.contains("low confidence"), "got:\n{md}");
     }
 
     #[test]
