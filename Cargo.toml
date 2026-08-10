@@ -1,6 +1,6 @@
 [package]
 name = "readany"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.88"
 authors = ["Allan Tumuhimbise"]
@@ -10,7 +10,15 @@ repository = "https://github.com/allantumu/readany"
 readme = "README.md"
 keywords = ["markdown", "document", "ocr", "pdf", "converter"]
 categories = ["text-processing", "parser-implementations"]
-include = ["/src", "/README.md", "/LICENSE"]
+# An explicit allow-list, not an ignore-list. `cargo package --list` stays
+# reviewable because nothing reaches the tarball without being named here —
+# not the corpus, not `pkg/`, not a stray fixture.
+#
+# `THIRD-PARTY-LICENSES.md` is deliberately absent: it exists because the npm
+# package distributes a *binary* with a hundred crates linked into it. This
+# tarball is source and links nothing, so shipping other projects' notices in
+# it would misstate what is being distributed.
+include = ["/src", "/README.md", "/LICENSE", "/CHANGELOG.md"]
 
 [lib]
 name = "readany"
@@ -24,7 +32,15 @@ pdf-inspector = "0.1"
 # Every Office format is a zip, so the bomb guard in `archive` needs to walk
 # one before `anydoc` unpacks it. Default features off: no filesystem, no
 # encryption, no time — just deflate, so the crate still builds for wasm32.
-zip = { version = "5", default-features = false, features = ["deflate-flate2"] }
+#
+# **Version 8 to match calamine's, and that is a size decision.** This was `5`,
+# and `anydoc` reaches calamine which asks for `zip 8`, so the WebAssembly blob
+# carried two complete zip implementations that never met. Deduplicating them
+# cost nothing at this call site — the guard uses `ZipArchive`, `by_index` and
+# `by_index_raw`, unchanged across the gap — and is measured in
+# `docs/wasm-size.md`. Keep this in step with whatever calamine resolves to;
+# falling behind silently re-links the second copy.
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 
 # The third engine, built here.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "bmp", "webp"] }
@@ -37,7 +53,7 @@ env_logger = "0.11"
 
 [dev-dependencies]
 tempfile = "3"
-zip = { version = "5", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 # Only to build encrypted PDFs for `tests/encrypted_pdf.rs`. The PDF standard
 # security handler is specified in terms of MD5, so a fixture that encrypts one
 # has no choice; nothing in the library hashes anything with it.

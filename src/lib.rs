@@ -26,6 +26,16 @@
 //! # }
 //! ```
 
+/// The version of this crate, as one fact rather than four.
+///
+/// `Cargo.toml`, `wasm/Cargo.toml`, `npm/package.json` and the generated
+/// `pkg/package.json` each used to carry a version string of their own, in a
+/// project whose whole claim is that it does not say things it has not
+/// checked. This constant is the source: `readany-wasm` refuses to compile
+/// unless its own version matches it, `scripts/version.sh` stamps the npm
+/// manifests from it, and CI runs that script in check mode.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 mod clock;
 pub mod error;
 pub mod ocr;

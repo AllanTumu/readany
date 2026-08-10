@@ -5,3 +5,4 @@ Cargo.lock
 *.onnx
 *.tgz
 .DS_Store
+/THIRD-PARTY-LICENSES.md

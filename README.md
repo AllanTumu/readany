@@ -12,7 +12,8 @@ cargo add readany          # Rust
 ```rust
 let doc = readany::read(&bytes)?;
 println!("{}", doc.markdown);
-println!("{}", doc.receipt());   // "4 page(s): 3 extracted, 1 recognised, 0 unresolved, in 41ms"
+println!("{}", doc.receipt());
+// 4 page(s): 3 extracted, 1 recognised, 0 unresolved, 0 marked for a person, in 41ms
 ```
 
 ## Why it exists
@@ -241,13 +242,74 @@ and **not one verdict, field, item, tax band or check changed**.
 | Handwriting marked and withheld | Working — **negatives measured on real receipts, positives synthetic** |
 | Text recognition backends | Traits defined here; implementation is separate |
 | PDF page rasterising | Not bundled by design; supply your own |
-| Node, Python, WASM bindings | Not started |
+| WebAssembly binding | **Published** — `npm install readany`, Node and browser |
+| Node native and Python bindings | Not started |
 
-146 tests pass — 124 unit and 22 integration, `cargo test` on 10 August 2026
-with `STATEMENT_CORPUS_ABSENT=1`, which the page-limit test requires you to set
-rather than let it pass against no corpus. `cargo clippy --all-targets -- -D
-warnings` is clean, and `cargo build --lib --target wasm32-unknown-unknown`
-succeeds.
+161 tests pass — 139 unit, 21 integration and 1 documentation test, `cargo test
+--release` on 10 August 2026 with `STATEMENT_CORPUS_ABSENT=1`, which the
+page-limit test requires you to set rather than let it pass against no corpus.
+`cargo clippy --all-targets -- -D warnings` is clean for the library and for
+the binding, and `cargo check --lib --target wasm32-unknown-unknown` succeeds.
+
+A further 18 checks run against the **built npm package** rather than against
+the source — `node wasm/test/binding.test.js`, after `./scripts/build-wasm.sh`.
+They exist because the binding had no test of any kind and went a whole release
+behind the crate's API without anything failing: `cargo check` on this crate
+passes whatever `wasm/` does, so nothing was watching the one artefact npm
+receives.
+
+## Limits
+
+Every input is written by a stranger, so a job runs against ceilings. They are
+the documented contract rather than "no limits", and a caller reading its own
+files can ask for `Limits::none()` — and has to ask, so that "we forgot" and
+"we chose" cannot look the same in a review.
+
+| Ceiling | Default | Enforced |
+|---|---|---|
+| input bytes | 50 MB | before anything is sniffed |
+| pages | 200 | after routing, before reading |
+| pixels per rendered page | 40,000,000 | at decode, in checked `u64` |
+| decompressed archive bytes | 200 MB | **counted as produced**, not read from the header |
+| archive entries | 10,000 | from the directory |
+| archive nesting depth | 2 | recursively, one level past the limit |
+| wall clock | 60 s | by killing a worker, never in this process |
+| resident memory | 1 GB | by the operating system, never in this process |
+
+The last two are carried here so that one table states the whole contract, and
+they are marked because Rust has no safe way to stop a thread: a parser stuck
+in a loop cannot be interrupted from inside the process running it.
+
+A refusal is `ReadError::TooLarge`, which names the limit and the value that
+broke it. It is a statement about what we are willing to spend on a document,
+not a judgement about the document.
+
+Measured before the archive guard existed: a 4.6 MB `.xlsx`, structurally
+valid, expanded to 1.04 GB and was read to completion in 3.0 s using 1.075 GB
+of resident memory. The same file is now refused in 0.05 s using 11.5 MB,
+because the bytes are counted and discarded rather than held.
+
+## WebAssembly
+
+```bash
+npm install readany
+```
+
+The binding is in `wasm/` and is published to npm as one `.wasm` with two
+JavaScript glues — CommonJS for Node, ESM for browsers. The blob is
+byte-identical between them, which `scripts/build-wasm.sh` checks rather than
+assumes.
+
+**It carries the routing, the readers and the preparation stages, and no
+recognition.** `Detector`, `Recognizer` and `Rasterise` all need a native
+runtime, so a page of pixels comes back in `unresolved_pages`. `npm/README.md`
+says so in its first paragraph, because that is the sentence a person installing
+the package needs before any other.
+
+Built and published by `scripts/build-wasm.sh`, which also enforces one version
+number across `Cargo.toml`, `wasm/Cargo.toml`, `npm/package.json` and the
+generated `pkg/package.json`. `wasm/src/lib.rs` refuses to compile if the first
+two disagree. Size, and what each switch bought, is in `docs/wasm-size.md`.
 
 ## Design decisions
 
@@ -343,13 +405,17 @@ one path where it is unavoidable — a picture chosen from the photo library.
    projection statistic is not.
 2. Move to PP-OCRv6 mobile — 1.5 MB against 4.7, and reported to be faster and
    more accurate.
-3. napi-rs, PyO3 and wasm-bindgen bindings.
+3. napi-rs and PyO3 bindings.
 4. Benchmark against `oar-ocr` and Tesseract on real scans.
 
-Two entries were removed from this list on 10 August 2026 because they were
-already done and the list had not noticed: recognition batches through
+Three entries were removed from this list because they were already done and
+the list had not noticed. On 10 August 2026: recognition batches through
 `Recognizer::recognize_batch` (measured, and defaulted **off** — see
-`readany-ocr`), and the rasteriser seam exists as `pdf::render::Rasterise`.
+`readany-ocr`), and the rasteriser seam exists as `pdf::render::Rasterise`. In
+0.2.0: the wasm-bindgen binding, which had been **published to npm since 6
+August** while both this list and the status table above called it not started.
+A list that has stopped tracking what shipped is the same defect as a
+measurement nobody re-ran.
 
 ## Not supported
 

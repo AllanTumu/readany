@@ -15,12 +15,14 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 20, registry-url: "https://registry.npmjs.org" }
       - run: cargo install wasm-pack --locked
-      - run: wasm-pack build wasm --target nodejs --release --out-dir ../pkg
-      - name: Restore package metadata
-        run: |
-          cp npm/package.json pkg/package.json
-          cp npm/README.md pkg/README.md
-          cp LICENSE pkg/LICENSE
+
+      # One script, the same one used by hand, rather than a second copy of the
+      # build steps that can drift from it. It builds both targets, checks the
+      # version across every manifest, proves pkg/package.json still matches
+      # npm/package.json, and fails if a build-machine path survived into the
+      # blob.
+      - run: ./scripts/build-wasm.sh
+
       - run: npm publish --access public
         working-directory: pkg
         env:

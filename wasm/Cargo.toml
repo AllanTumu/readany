@@ -1,6 +1,10 @@
 [package]
 name = "readany-wasm"
-version = "0.1.0"
+# Must equal the version in ../Cargo.toml. `wasm/src/lib.rs` asserts it at
+# compile time, so a mismatch is a build failure rather than a wrong number on
+# a published package. `scripts/version.sh` stamps the npm manifests from the
+# same source.
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "WebAssembly bindings for readany: read any document into clean Markdown"
@@ -15,10 +19,42 @@ readany = { path = ".." }
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
+# For throwing a real `Error` carrying a `kind`, so a caller can act on a
+# refusal without matching on English prose. Already in the tree behind
+# wasm-bindgen; naming it here costs nothing and makes the use visible.
+js-sys = "0.3"
 
 [profile.release]
 opt-level = "z"
 lto = true
+# **No `panic = "abort"`, and that was measured rather than reasoned about.**
+# `wasm32-unknown-unknown` has no unwinding to remove, so the usual size win
+# does not exist here — and setting it anyway made the blob **1,555 bytes
+# larger** (5,582,862 against 5,581,307), because it changes how the panic path
+# is emitted without removing anything. A switch that is famous for shrinking
+# binaries, that grows this one, is exactly the kind of thing worth writing
+# down so nobody adds it again.
+# **`trim-paths` is not here, and it was tried.** The published blob carried
+# 234 absolute paths from whichever machine built it — 232 from the cargo
+# registry and 2 from this crate's own sources — spelling out a username and a
+# directory layout. `trim-paths = "all"` is the obvious fix and cargo 1.97.1
+# refuses it: the feature is still unstable, and requiring nightly to build a
+# release is a worse trade than the paths.
+#
+# `scripts/build-wasm.sh` does the same job with `--remap-path-prefix`, which
+# has been stable for years, and then greps the blob to prove the paths are
+# gone. The prefixes are absolute and machine-specific, so they cannot live in
+# a committed config file — which is why this is a script and not a line here.
+# Revisit when `trim-paths` stabilises.
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = false
+# `-Oz` on top of `opt-level = "z"` is not redundant: rustc optimises Rust and
+# `wasm-opt` optimises the WebAssembly rustc emitted, and the second pass
+# reaches things the first cannot — it removes unreachable functions across the
+# whole module, merges duplicate ones, and shrinks the locals rustc names.
+# Measured on this crate in `docs/wasm-size.md`.
+#
+# This used to read `wasm-opt = false` with no reason recorded, which is the
+# same defect as an undocumented defence: nobody could tell whether it was a
+# considered trade-off or a workaround somebody forgot to remove.
+wasm-opt = ["-Oz"]

@@ -48,3 +48,37 @@ jobs:
         with: { targets: wasm32-unknown-unknown }
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --lib --target wasm32-unknown-unknown
+
+      # The binding, not just the library. `cargo check` on the root crate
+      # passes whatever the binding does, and the binding is what npm gets — it
+      # went two releases' worth of API behind without anything failing.
+      #
+      # This also runs the compile-time assertion in wasm/src/lib.rs that the
+      # crate and the binding carry the same version.
+      - run: cargo check --manifest-path wasm/Cargo.toml --target wasm32-unknown-unknown
+
+  binding:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-unknown-unknown }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-pack --locked
+      # Builds the package the way a release builds it, then exercises the
+      # built artefact. `cargo check` cannot see a binding that has fallen
+      # behind the crate's API, and that is exactly how this one did.
+      - run: ./scripts/build-wasm.sh
+      - run: node wasm/test/binding.test.js
+
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      # Four manifests used to carry four copies of one version number, and the
+      # published one would have won any disagreement in silence.
+      - run: ./scripts/version.sh --check

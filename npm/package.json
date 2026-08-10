@@ -1,7 +1,7 @@
 {
   "name": "readany",
-  "version": "0.1.0",
-  "description": "Read any document into clean Markdown — Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, CSV and PDF. Tells you which pages it could not read instead of dropping them silently.",
+  "version": "0.2.0",
+  "description": "Route and read documents into clean Markdown — Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, CSV and text-layer PDF. Names the pages it could not read instead of dropping them silently. Text recognition is not included: it needs a native runtime.",
   "license": "MIT",
   "author": "Allan Tumuhimbise",
   "homepage": "https://github.com/AllanTumu/readany#readme",
@@ -10,7 +10,13 @@
   "keywords": ["markdown","document","pdf","docx","xlsx","pptx","epub","rtf","ocr","wasm","converter","extract","parse"],
   "main": "readany_wasm.js",
   "types": "readany_wasm.d.ts",
-  "files": ["readany_wasm.js","readany_wasm.d.ts","readany_wasm_bg.wasm","readany_wasm_bg.wasm.d.ts","README.md","LICENSE"],
+  "exports": {
+    ".": { "types": "./readany_wasm.d.ts", "default": "./readany_wasm.js" },
+    "./web": { "types": "./readany_wasm_web.d.ts", "default": "./readany_wasm_web.js" },
+    "./readany_wasm_bg.wasm": "./readany_wasm_bg.wasm",
+    "./package.json": "./package.json"
+  },
+  "files": ["readany_wasm.js","readany_wasm.d.ts","readany_wasm_web.js","readany_wasm_web.d.ts","readany_wasm_bg.wasm","readany_wasm_bg.wasm.d.ts","README.md","LICENSE","THIRD-PARTY-LICENSES.md"],
   "engines": { "node": ">=18" },
   "sideEffects": ["./readany_wasm.js"],
   "publishConfig": { "access": "public" }
