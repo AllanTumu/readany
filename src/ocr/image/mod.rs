@@ -11,4 +11,4 @@ pub mod frame;
 pub mod orient;
 
 pub use correction::Correction;
-pub use decode::{decode_bytes, decode_path, GrayImage};
+pub use decode::{decode_bytes, decode_bytes_using, decode_path, heif_brand, DecodeImage, GrayImage};

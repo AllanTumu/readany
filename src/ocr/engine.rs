@@ -19,13 +19,54 @@ pub struct ScanOptions {
     pub flatten_lighting: bool,
     /// Find the document inside the photograph and read only that.
     ///
-    /// A phone photograph of a receipt is mostly table, and the detector
+    /// A phone photograph of a receipt *can* be mostly table, and the detector
     /// shrinks whatever it is given to a fixed working size, so every glyph
-    /// shrinks with the table. Cutting the document out first is worth more
-    /// than any other single change measured on real photographs.
+    /// shrinks with the table.
+    ///
+    /// # How much table there actually was: measured, and it was not much
+    ///
+    /// That sentence used to end "cutting the document out first is worth more
+    /// than any other single change measured on real photographs", which
+    /// described a photograph nobody in the corpus had taken. Measured on the
+    /// five, 4032 × 3024 each, reporting what
+    /// [`crate::ocr::image::frame::content_bounds`] returned:
+    ///
+    /// | Page | kept | frame handed to the detector |
+    /// |---|---|---|
+    /// | 1 | 87.6% | 3951 × 2702 |
+    /// | 2 | 61.3% | 4032 × 1855 |
+    /// | 3 | — found nothing | 4032 × 3024 |
+    /// | 4 | 78.7% | 4032 × 2379 |
+    /// | 5 | — found nothing | 4032 × 3024 |
+    ///
+    /// **A person photographing a receipt fills the frame with it.** Two of the
+    /// five were over `frame::MAX_AREA` and correctly declined, and the other
+    /// three were trimmed rather than cut out. The whole shrink from frame to
+    /// detector tensor is 1.58×, not the 4.2× the `max_side` 960 arithmetic
+    /// predicts, because callers reading photographs already pass 2560.
+    ///
+    /// So cropping is worth having and is **not** what was wrong with the
+    /// corpus. That was orientation — see [`Engine::scan_bytes`].
     pub crop_to_content: bool,
     /// Correct page rotation of 90, 180 or 270 degrees.
     pub fix_orientation: bool,
+    /// Take the page as being turned this way, instead of measuring it.
+    ///
+    /// `None` is the normal setting and means "decide", by `fix_orientation`
+    /// or, when that is off, by assuming the page is upright.
+    ///
+    /// This exists because measuring it does not work on a photograph.
+    /// [`crate::ocr::image::orient::detect`] carries the table: on five real
+    /// photographed receipts it was wrong five times, and wrong in the
+    /// direction that calls a sideways page upright. Nothing in a projection
+    /// profile separates them, because the biggest dark region in a photograph
+    /// of a receipt is the shadow under it.
+    ///
+    /// So the engine stops guessing and reads the page each way up instead.
+    /// [`Engine::scan_bytes`] sets this field on its later attempts, and keeps
+    /// whichever attempt actually read — a measurement rather than a heuristic,
+    /// taken from the recogniser that is already running.
+    pub turn: Option<super::image::orient::Orientation>,
     /// Correct small skew introduced by scanners and phone cameras.
     pub fix_skew: bool,
     /// Below this mean confidence, [`ScanResult::needs_review`] returns true.
@@ -89,6 +130,7 @@ impl ScanOptions {
             flatten_lighting: true,
             crop_to_content: true,
             fix_orientation: true,
+            turn: None,
             fix_skew: true,
             confidence_floor: 0.5,
             retry_when_unsure: true,
@@ -126,6 +168,7 @@ impl ScanOptions {
             flatten_lighting: false,
             crop_to_content: false,
             fix_orientation: false,
+            turn: None,
             fix_skew: false,
             confidence_floor: 0.5,
             // Nothing to retry *with*: the corrections that a retry turns off
@@ -158,6 +201,14 @@ impl ScanOptions {
     /// | 4° | 0 of 18, `Failed` | **18 of 18, verified** |
     /// | 12° | 0 of 18, `NotThisKind` | **18 of 18, verified** |
     /// | 270° | 0 of 18, `NotThisKind` | **18 of 18, verified** |
+    /// | 90° | 0 of 18, `NotThisKind` | **18 of 18, verified** |
+    ///
+    /// The 90° row was `0 of 18` under this profile too until the retry ladder
+    /// grew its quarter turns — orientation detection recovered 270° and not
+    /// 90°, and neither the profile nor the detector changed to fix it. See
+    /// [`Engine::scan_bytes`]. 180° is still refused under every profile, and
+    /// correctly: an upside-down page and an upright one have the same
+    /// projection, so only a classifier could separate them and none is here.
     ///
     /// **One degree of tilt was the difference between reading a statement and
     /// refusing it**, and one degree is not a damaged document — it is a sheet
@@ -176,6 +227,7 @@ impl ScanOptions {
             // The one that does the damage. See the table above.
             crop_to_content: false,
             fix_orientation: true,
+            turn: None,
             fix_skew: true,
             confidence_floor: 0.5,
             retry_when_unsure: true,
@@ -200,7 +252,17 @@ pub struct Prepared {
 /// Decode a page and straighten it. This needs no model and no network,
 /// so it works today and is useful on its own.
 pub fn prepare_bytes(bytes: &[u8], options: &ScanOptions) -> Result<Prepared> {
-    let whole = super::image::decode_bytes(bytes)?;
+    prepare_bytes_using(bytes, options, None)
+}
+
+/// As [`prepare_bytes`], with a platform decoder for containers this crate
+/// cannot open — HEIC above all. See [`super::image::DecodeImage`].
+pub fn prepare_bytes_using(
+    bytes: &[u8],
+    options: &ScanOptions,
+    decoder: Option<&dyn super::image::DecodeImage>,
+) -> Result<Prepared> {
+    let whole = super::image::decode_bytes_using(bytes, &crate::limits::Limits::default(), decoder)?;
 
     // Cut the document out of the photograph before anything else. Everything
     // downstream then works on paper rather than on a table.
@@ -225,10 +287,12 @@ pub fn prepare_bytes(bytes: &[u8], options: &ScanOptions) -> Result<Prepared> {
         decoded.clone()
     };
 
-    let orientation = if options.fix_orientation {
-        super::image::orient::detect(&evened)
-    } else {
-        super::image::orient::Orientation::Upright
+    let orientation = match options.turn {
+        // An answer supplied by the caller is not second-guessed. This is how
+        // `scan_bytes` reads a page the other way up.
+        Some(turn) => turn,
+        None if options.fix_orientation => super::image::orient::detect(&evened),
+        None => super::image::orient::Orientation::Upright,
     };
     let turned = super::image::orient::apply(&evened, orientation);
     let rotation = orientation.degrees();
@@ -274,6 +338,7 @@ pub struct Engine<D: Detector, R: Recognizer> {
     detector: D,
     recognizer: R,
     options: ScanOptions,
+    decoder: Option<Box<dyn super::image::DecodeImage>>,
 }
 
 impl<D: Detector, R: Recognizer> Engine<D, R> {
@@ -282,6 +347,7 @@ impl<D: Detector, R: Recognizer> Engine<D, R> {
             detector,
             recognizer,
             options: ScanOptions::default(),
+            decoder: None,
         }
     }
 
@@ -290,32 +356,105 @@ impl<D: Detector, R: Recognizer> Engine<D, R> {
         self
     }
 
+    /// Supply the platform's decoder for containers this crate cannot open.
+    ///
+    /// Without one, a HEIC photograph — which is what an iPhone writes unless
+    /// it is told otherwise — comes back as
+    /// [`crate::ocr::ScanError::NeedsPlatformDecoder`] and is never read. See
+    /// [`super::image::DecodeImage`].
+    pub fn with_decoder(mut self, decoder: Box<dyn super::image::DecodeImage>) -> Self {
+        self.decoder = Some(decoder);
+        self
+    }
+
     /// Read a page: straighten, detect, recognise, order.
     ///
     /// If the first attempt comes back unsure and `retry_when_unsure` is set,
-    /// the page is read again without the geometric corrections and the better
-    /// attempt is returned. A wrongly detected rotation is the commonest way a
-    /// perfectly readable page turns into nonsense, and the engine can tell
-    /// that it happened, so it should not hand the nonsense back.
+    /// the page is read again a different way up and the better attempt is
+    /// returned. A wrong rotation is the commonest way a perfectly readable
+    /// page turns into nonsense, and the engine can tell that it happened, so
+    /// it should not hand the nonsense back.
+    ///
+    /// # The ladder, and why the last two rungs exist
+    ///
+    /// The first two retries turn the geometric corrections **off**, for the
+    /// page whose corrections were the problem. The last two turn the page a
+    /// quarter, for the page whose correction never fired at all — and that is
+    /// the whole of the receipt corpus. Measured on five real photographed
+    /// receipts, all five genuinely on their side and all five called upright
+    /// by [`crate::ocr::image::orient::detect`]:
+    ///
+    /// | | as read before | with the quarter turns |
+    /// |---|---|---|
+    /// | boxes a page | 12–22 | 18–46 |
+    /// | characters a box | **1.0–1.1** | **8.7–15.0** |
+    /// | mean confidence | 0.22–0.29 | 0.80–0.97 |
+    /// | below the floor | 5 of 5 | 0 of 5 |
+    ///
+    /// One character a box is the signature of a page handed to the recogniser
+    /// sideways: a line of type becomes a tall narrow crop, and a tall narrow
+    /// crop scaled to the recogniser's fixed height is a few pixels wide.
+    ///
+    /// **This is a measurement standing in for a heuristic.** No projection
+    /// statistic separates those two columns — several were tried and are
+    /// recorded on `orient::detect` — but the recogniser's own output separates
+    /// them by a factor of ten, and the recogniser is already running.
+    ///
+    /// # Cost
+    ///
+    /// Nothing at all for a page that reads first time, which is the common
+    /// case: the ladder is entered only below `confidence_floor` and stops at
+    /// the first rung that clears it. A rung whose preparation would be
+    /// identical to one already tried is skipped rather than run, so a page
+    /// that was found upright and unskewed does not pay for two retries that
+    /// would decode the same pixels again.
     pub fn scan_bytes(&self, bytes: &[u8]) -> Result<ScanResult> {
         let mut best = self.scan_once(bytes, &self.options)?;
         if !self.options.retry_when_unsure || best.confidence() >= self.options.confidence_floor {
             return Ok(best);
         }
 
-        for attempt in [
-            ScanOptions {
+        use super::image::orient::Orientation;
+        let corrections_fired = best.rotation != 0 || best.skew.abs() >= 0.01;
+        let attempts = [
+            // Rungs 1 and 2: the corrections were the problem. Worth running
+            // only if they actually did something on the first attempt.
+            corrections_fired.then(|| ScanOptions {
                 fix_orientation: false,
+                turn: None,
                 ..self.options.clone()
-            },
-            ScanOptions {
+            }),
+            corrections_fired.then(|| ScanOptions {
                 fix_orientation: false,
+                turn: None,
                 fix_skew: false,
                 ..self.options.clone()
-            },
-        ] {
+            }),
+            // Rungs 3 and 4: the page is on its side and nothing said so. Only
+            // offered to a profile that admits it does not know which way up
+            // the page is — a rendered page does, and does not retry at all.
+            self.options.fix_orientation.then(|| ScanOptions {
+                turn: Some(Orientation::Rotated90),
+                ..self.options.clone()
+            }),
+            self.options.fix_orientation.then(|| ScanOptions {
+                turn: Some(Orientation::Rotated270),
+                ..self.options.clone()
+            }),
+        ];
+
+        // Every way up already read, so a rung that would repeat one is skipped
+        // rather than paying for a second identical inference pass.
+        let mut read_at: Vec<u16> = vec![best.rotation];
+        for attempt in attempts.into_iter().flatten() {
+            if let Some(turn) = attempt.turn {
+                if read_at.contains(&turn.degrees()) {
+                    continue;
+                }
+            }
             let again = self.scan_once(bytes, &attempt)?;
-            if again.confidence() > best.confidence() {
+            read_at.push(again.rotation);
+            if read_mass(&again) > read_mass(&best) {
                 best = again;
             }
             if best.confidence() >= self.options.confidence_floor {
@@ -328,7 +467,7 @@ impl<D: Detector, R: Recognizer> Engine<D, R> {
     fn scan_once(&self, bytes: &[u8], options: &ScanOptions) -> Result<ScanResult> {
         let watch = crate::clock::Stopwatch::start();
         let stage = crate::clock::Stopwatch::start();
-        let prepared = prepare_bytes(bytes, options)?;
+        let prepared = prepare_bytes_using(bytes, options, self.decoder.as_deref())?;
         let (width, height) = prepared.image.dimensions();
         let prepare_ms = stage.elapsed_ms();
 
@@ -389,6 +528,29 @@ impl<D: Detector, R: Recognizer> Engine<D, R> {
             &super::markdown::MarkdownOptions::default(),
         ))
     }
+}
+
+/// How much of the page an attempt actually read, for choosing between
+/// attempts. Characters, each weighted by how sure the recogniser was of it.
+///
+/// **Not mean confidence, and the difference is not cosmetic.** Mean confidence
+/// is an average over whatever the detector happened to find, so an attempt
+/// that found three boxes and read them well scores above one that found forty
+/// and read them well. With two rungs on the ladder that was survivable; with
+/// four it is a real way to pick the wrong page, and this crate has already
+/// written down that mean confidence answers "was what I read hard to read",
+/// never "did I read everything" — see [`TextBox::confidence`].
+///
+/// This asks the second question. It is still not a correctness signal and is
+/// not used as one: it decides only which of two readings of the *same page* to
+/// keep, where more text read more surely is the better reading by definition.
+fn read_mass(result: &ScanResult) -> f32 {
+    result
+        .lines
+        .iter()
+        .flat_map(|l| l.boxes.iter())
+        .map(|b| b.confidence * b.text.chars().count() as f32)
+        .sum()
 }
 
 /// Cut a detected box out of the **original** pixels.
@@ -646,5 +808,173 @@ mod tests {
         let result = engine.scan_bytes(&png_page()).unwrap();
         assert!(result.lines.is_empty());
         assert!(result.needs_review(0.5));
+    }
+
+    /// A caller's answer beats the measurement, because the measurement is
+    /// what was wrong on every real photograph.
+    #[test]
+    fn a_supplied_turn_is_applied_instead_of_being_detected() {
+        let sideways = ScanOptions {
+            turn: Some(crate::ocr::image::orient::Orientation::Rotated90),
+            ..geometry_only()
+        };
+        let prepared = prepare_bytes(&png_page(), &sideways).unwrap();
+        assert_eq!(prepared.rotation, 90, "the supplied turn was not applied");
+        // A quarter turn swaps the page's sides. 200x120 in, 120x200 out.
+        assert_eq!(prepared.image.dimensions(), (120, 200));
+        assert_eq!(
+            prepared.correction.orientation,
+            crate::ocr::image::orient::Orientation::Rotated90,
+            "the crop path must know which way the page was turned, or every \
+             box maps back to the wrong pixels"
+        );
+    }
+
+    /// A recogniser that reads well only when the crop is wider than it is
+    /// tall, which is what a line of type looks like the right way up. This is
+    /// the corpus's defect in miniature: sideways, every crop is a tall sliver
+    /// and comes back as one unsure character.
+    struct OnlyReadsUpright;
+    impl Recognizer for OnlyReadsUpright {
+        fn recognize(&self, crop: &GrayImage) -> Result<(String, f32)> {
+            if crop.width() > crop.height() {
+                Ok(("ELEVEN CHAR".to_string(), 0.95))
+            } else {
+                Ok(("x".to_string(), 0.20))
+            }
+        }
+    }
+
+    /// A detector that always returns one box the shape of the page, so the
+    /// crop it hands over is wide on an upright page and tall on a sideways
+    /// one — exactly as a real line of text behaves.
+    struct BoxTheWholePage;
+    impl Detector for BoxTheWholePage {
+        fn detect(&self, image: &GrayImage) -> Result<Vec<Quad>> {
+            Ok(vec![Quad::from_rect(
+                0.0,
+                0.0,
+                image.width() as f32,
+                image.height() as f32,
+            )])
+        }
+    }
+
+    /// **The fix for the five photographs.** A page that only reads one way up
+    /// must be read that way up, and the engine must find that out by reading
+    /// rather than by measuring the pixels.
+    ///
+    /// Falsified by removing the two quarter-turn rungs from the ladder in
+    /// `scan_bytes`: this then returns `x` at 0.20 and goes red. It is the only
+    /// test that does.
+    #[test]
+    fn a_page_that_only_reads_sideways_is_turned_until_it_reads() {
+        // A tall page, so the detector's box is tall and the stub recogniser
+        // refuses it — until the engine turns the page a quarter.
+        let mut img = GrayImage::from_pixel(80, 400, ::image::Luma([255u8]));
+        for y in 100..300 {
+            for x in 20..60 {
+                img.put_pixel(x, y, ::image::Luma([0u8]));
+            }
+        }
+        let mut bytes = Vec::new();
+        ::image::DynamicImage::ImageLuma8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                ::image::ImageFormat::Png,
+            )
+            .unwrap();
+
+        let engine = Engine::new(BoxTheWholePage, OnlyReadsUpright).with_options(ScanOptions {
+            // Skew estimation on a synthetic block is noise here, and this test
+            // is about the quarter turn.
+            fix_skew: false,
+            ..geometry_only()
+        });
+        let result = engine.scan_bytes(&bytes).unwrap();
+        assert_eq!(
+            result.text(),
+            "ELEVEN CHAR",
+            "the page was never turned; it came back at {:.2} confidence, \
+             rotation {}",
+            result.confidence(),
+            result.rotation
+        );
+        assert!(result.confidence() > 0.9);
+        assert!(!result.needs_review(0.5));
+    }
+
+    /// Twenty boxes on a wide page, one on a tall one — the shape a real
+    /// detector produces, since a line of type is only a line when the page is
+    /// the right way up.
+    struct ManyBoxesWhenWide;
+    impl Detector for ManyBoxesWhenWide {
+        fn detect(&self, image: &GrayImage) -> Result<Vec<Quad>> {
+            let (w, h) = image.dimensions();
+            if w > h {
+                Ok((0..20)
+                    .map(|i| Quad::from_rect(0.0, i as f32 * 4.0, w as f32, 3.0))
+                    .collect())
+            } else {
+                Ok(vec![Quad::from_rect(0.0, 0.0, w as f32, h as f32)])
+            }
+        }
+    }
+
+    /// Both readings are poor, and the poorer-looking one is the fuller one.
+    struct SureOfNothingMuch;
+    impl Recognizer for SureOfNothingMuch {
+        fn recognize(&self, crop: &GrayImage) -> Result<(String, f32)> {
+            if crop.width() > crop.height() {
+                Ok(("TWELVE CHARS".to_string(), 0.45))
+            } else {
+                Ok(("x".to_string(), 0.49))
+            }
+        }
+    }
+
+    /// **The retry must not prefer an attempt that read almost nothing just
+    /// because it was sure of it.**
+    ///
+    /// Every attempt here is below the floor, which is the regime where the
+    /// comparison actually decides something: one box read at 0.49 against
+    /// twenty read at 0.45. Mean confidence says the single box is the better
+    /// reading. It is not — it is 1 character against 240.
+    ///
+    /// Falsified by comparing on `again.confidence() > best.confidence()` in
+    /// `scan_bytes`, as this did before the ladder grew: the result is then
+    /// `x`, and this goes red.
+    #[test]
+    fn a_confident_sliver_does_not_beat_a_page_that_was_actually_read() {
+        let mut img = GrayImage::from_pixel(80, 400, ::image::Luma([255u8]));
+        for y in 100..300 {
+            for x in 20..60 {
+                img.put_pixel(x, y, ::image::Luma([0u8]));
+            }
+        }
+        let mut bytes = Vec::new();
+        ::image::DynamicImage::ImageLuma8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                ::image::ImageFormat::Png,
+            )
+            .unwrap();
+
+        let engine =
+            Engine::new(ManyBoxesWhenWide, SureOfNothingMuch).with_options(ScanOptions {
+                fix_skew: false,
+                ..geometry_only()
+            });
+        let result = engine.scan_bytes(&bytes).unwrap();
+        assert_eq!(
+            result.lines.iter().map(|l| l.boxes.len()).sum::<usize>(),
+            20,
+            "kept the one-character reading; it came back as {:?} at {:.2}",
+            result.text(),
+            result.confidence(),
+        );
+        // And the reading it kept is genuinely the less confident one, or the
+        // test proves nothing about the comparison.
+        assert!(result.confidence() < 0.49);
     }
 }

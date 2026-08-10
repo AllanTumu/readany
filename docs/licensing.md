@@ -52,6 +52,25 @@ BSD-3-Clause and free.
 but keeping the binary out of the build keeps the distribution question simple
 and matches how `ort` loads ONNX Runtime.
 
+**HEIC decoding.** `libheif` is LGPL, and the rule above forbids it. That is not
+a technicality here: every iPhone photograph is HEIC by default, so this is the
+container the majority of a receipt scanner's input arrives in, and refusing to
+decode it looks like a product-blocking decision.
+
+It is not, because the licence question is avoidable rather than expensive.
+iOS decodes HEIC with ImageIO and Android with `BitmapFactory` on API 28 and
+above — both already on the device, neither linked by us. So no decoder is
+linked into this crate at all; `ocr::image::DecodeImage` is declared here and
+implemented by whatever the platform ships, the third use of the seam pattern
+already holding `OcrBackend` and `Rasterise`.
+
+On a Linux server there is no platform decoder, and there are exactly two honest
+answers: settle `libheif`'s LGPL terms deliberately for the *server* binary,
+where dynamic linking and a relink offer are straightforward, or refuse HEIC by
+name. The refusal is implemented and is the current answer —
+`ScanError::NeedsPlatformDecoder`. **A named refusal is a valid answer; a
+licence taken on by accident is not.**
+
 ## Checking this stays true
 
 Run before adding any dependency:

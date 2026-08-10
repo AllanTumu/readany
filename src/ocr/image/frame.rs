@@ -1,9 +1,28 @@
 //! Finding the document inside a photograph.
 //!
-//! A phone photograph of a receipt is mostly table. The detector shrinks the
-//! whole frame to its working size, so the receipt — and every glyph on it —
-//! shrinks with it. Measured on real photographs: reading the full frame finds
-//! a fraction of the text that reading a cropped receipt does.
+//! A phone photograph of a receipt can be mostly table. The detector shrinks
+//! the whole frame to its working size, so the receipt — and every glyph on it
+//! — shrinks with it.
+//!
+//! # What the real photographs looked like
+//!
+//! Measured 10 August 2026 on the five in the corpus, 4032 × 3024 each, by
+//! saving the image this module hands on and looking at it: the receipt fills
+//! **61% to 100%** of the frame on all five. Two were above [`MAX_AREA`] and
+//! this module correctly returned `None`; the other three were trimmed by 12 to
+//! 39%. There is no small object on a large table anywhere in the set.
+//!
+//! That is the module working, not failing, and it is worth writing down
+//! because the sentence above was used to explain a defect it had nothing to do
+//! with. The five photographs came back at one character a box, and the cause
+//! was orientation — see [`super::orient::detect`].
+//!
+//! **What is still unmeasured here**: a receipt that genuinely is a small
+//! object in a large frame. Nobody in this corpus took that photograph, so the
+//! claim that cropping is "worth more than any other single change" rests on no
+//! measurement in this repository and has been withdrawn from
+//! [`crate::ocr::ScanOptions::crop_to_content`]. The synthetic tests below
+//! cover the shape; a real one would need a photograph nobody has taken yet.
 //!
 //! Edge detection is the obvious approach and it is the wrong one here. A white
 //! receipt on a pale table has almost no edge to find, and the three real

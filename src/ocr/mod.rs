@@ -13,7 +13,7 @@ pub mod models;
 pub mod recognize;
 pub mod types;
 
-pub use engine::{prepare, prepare_bytes, Engine, Prepared, ScanOptions};
+pub use engine::{prepare, prepare_bytes, prepare_bytes_using, Engine, Prepared, ScanOptions};
 pub use error::{Result, ScanError};
 pub use markdown::MarkdownOptions;
 pub use types::{Quad, ScanResult, TextBox, TextLine};

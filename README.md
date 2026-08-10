@@ -23,9 +23,17 @@ Three engines already solve three parts of this problem, and nobody joins them u
 |---|---|---|
 | [anydoc](https://github.com/firecrawl/anydoc) | 14 office formats | pages with no text layer |
 | [pdf-inspector](https://github.com/firecrawl/pdf-inspector) | text-based PDFs | pages with no text layer |
-| the `ocr` module here | scans and photographs | nothing else |
+| the `ocr` module here | scans and photographs | containers it links no decoder for |
 
 readany routes each file — and each **page** — to whichever engine can read it.
+
+Pictures decode from JPEG, PNG, TIFF, BMP and WebP in pure Rust, on every
+surface including WebAssembly. **HEIC does not**, and that is deliberate: the
+only usable decoder is LGPL, and static linking it into a mobile app is a real
+licence question rather than a formality. iOS and Android both decode HEIC in
+the platform already, so `ocr::image::DecodeImage` is the seam they plug into —
+and where nothing does, HEIC is refused **by name**, not reported as an
+unrecognised file. See [Decoding what this crate cannot](#decoding-what-this-crate-cannot).
 
 ## The case this was built for
 
@@ -93,7 +101,39 @@ Exit codes: `0` whole file read, `1` unreadable, `2` usage error, **`3` read in 
 | photograph, decode + straighten | OCR | 42–53 ms |
 | photograph, full OCR (8 lines) | OCR | 656 ms |
 
-Skew of exactly 7.0 degrees was measured as 7.10. A page turned on its side was reported as rotation 90.
+The OCR row was produced by the **Chinese** `ch_PP-OCRv4_rec` recogniser on the
+Ugandan receipt described below, and is a timing rather than an accuracy claim.
+
+Skew of exactly 7.0 degrees was measured as 7.10.
+
+> **Corrected 10 August 2026: orientation detection does not work on
+> photographs.** This line used to end "a page turned on its side was reported
+> as rotation 90", from a synthetic fixture, and generalised from it.
+>
+> Measured on five real photographed receipts, 4032 × 3024, every one of them
+> genuinely on its side: `orient::detect` called **five of five upright**, and
+> called the same five upright when they were turned upright first. It is not
+> weak on this input, it is inverted, and the cause is visible the moment the
+> ink mask is saved and looked at — the largest dark region in a photograph of
+> a receipt is the shadow under the paper, not the print.
+>
+> The consequence was the whole of the receipt corpus: a sideways line of type
+> becomes a tall narrow crop, a tall narrow crop scaled to the recogniser's
+> fixed height is a few pixels wide, and the corpus came back at **1.0 to 1.1
+> characters a box**. `Engine::scan_bytes` now settles this by reading rather
+> than by measuring pixels — a page below the confidence floor is read again a
+> quarter turned, and the attempt that read more, more surely, is kept.
+>
+> | | before | after |
+> |---|---|---|
+> | boxes a page | 12–22 | 18–46 |
+> | characters a box | 1.0–1.1 | **8.7–15.0** |
+> | mean confidence | 0.22–0.29 | **0.80–0.97** |
+> | below the floor | 5 of 5 | **0 of 5** |
+>
+> Both columns: same five photographs, `ScanOptions::for_photograph`, detector
+> `max_side` 2560, Latin PP-OCRv5. The corpus is one real person's receipts and
+> is not in this repository.
 
 ## Reading an actual receipt
 
@@ -118,7 +158,12 @@ CHANGE 1,300
 
 Eight lines out of eight. Two character errors in about 120 characters: `Kampela` for Kampala and `Mitk` for Milk. **Every figure is correct**, which is what a receipt is for.
 
-The same receipt turned on its side reads identically — orientation is detected as 90 and corrected before recognition.
+The same receipt turned on its side read identically, with orientation detected
+as 90 and corrected before recognition. **That result does not generalise, and
+was read as though it did.** It is a clean 700 × 900 crop of a receipt filling
+its own frame; on the five 4032 × 3024 phone photographs in the corpus the same
+detector is wrong five times out of five. See the correction under
+[Measured](#measured).
 
 ### Two honest findings from this run
 
@@ -145,13 +190,20 @@ Errors cut by 53%. `OUICXMART` became `QUICKMART`, `MitkZL8.500` became `Milk2L8
 | Per-page PDF read with OCR pages flagged | Working |
 | Office formats via anydoc | Working |
 | Text PDFs via pdf-inspector | Working |
-| Image decode, orientation, skew | Working |
+| Image decode: JPEG, PNG, TIFF, BMP, WebP | Working |
+| Image decode: HEIC | Seam defined here; the platform supplies the decoder |
+| Skew correction | Working |
+| Orientation | **Works on scans, not on photographs** — read the correction under [Measured](#measured) before trusting `rotation` |
 | CTC decoding, reading order, Markdown assembly | Working |
 | Text recognition backends | Traits defined here; implementation is separate |
 | PDF page rasterising | Not bundled by design; supply your own |
 | Node, Python, WASM bindings | Not started |
 
-42 tests pass. `cargo clippy --all-targets -- -D warnings` is clean.
+146 tests pass — 124 unit and 22 integration, `cargo test` on 10 August 2026
+with `STATEMENT_CORPUS_ABSENT=1`, which the page-limit test requires you to set
+rather than let it pass against no corpus. `cargo clippy --all-targets -- -D
+warnings` is clean, and `cargo build --lib --target wasm32-unknown-unknown`
+succeeds.
 
 ## Design decisions
 
@@ -194,20 +246,66 @@ Columns are split **before** boxes are grouped into lines. The other way round m
 
 `Detector` and `Recognizer` are traits. This crate ships the pipeline around them — image decode, orientation, skew correction, cropping, CTC decoding, reading order and Markdown assembly — but no model.
 
-Supply your own, or use a separate backend crate. Model file hashes for PP-OCRv4 are pinned in `ocr::models` and verified on load, so a corrupted or swapped file is rejected rather than silently producing nonsense.
+Supply your own, or use a separate backend crate.
 
 ```rust
 let engine = Engine::new(my_detector, my_recognizer);
 let markdown = engine.to_markdown("scan.png")?;
 ```
 
+**Where model verification actually lives.** This paragraph used to say hashes
+were "pinned in `ocr::models` and verified on load", next to a correction three
+sections above saying `ocr::models::resolve` had no caller. Both cannot be true
+and the correction is the true one: this crate offers `ocr::models::digest` and
+nothing here calls it. Verification is performed by the backend, in
+`readany-ocr/src/expect.rs`, which refuses to open a model whose file is not the
+declared one or whose dictionary cannot spell the characters it was opened to
+read.
+
+## Decoding what this crate cannot
+
+`ocr::image::DecodeImage` is the third seam in this crate, and it is shaped like
+the other two: declared here, implemented nowhere here.
+
+```rust
+let engine = Engine::new(det, rec).with_decoder(Box::new(my_platform_decoder));
+```
+
+| Where | Decoder |
+|---|---|
+| iOS | ImageIO, `CGImageSourceCreateWithData` |
+| Android | `BitmapFactory`, API 28 and above |
+| macOS desktop | ImageIO, in `readany-ocr::SipsDecoder` |
+| Linux server | `libheif` if the licence is settled, or the refusal below |
+
+With no decoder, a HEIC file is refused as `ScanError::NeedsPlatformDecoder`,
+which names the format and says what would open it. That is a different fact
+from `Unsupported` ("nobody knows what these bytes are") and from `Decode`
+("this file is damaged"), and a caller acts differently on each: the same
+photograph read on a phone would have succeeded.
+
+A trait with no implementor compiles anywhere, which is why this does not cost
+the WebAssembly build.
+
+**An app taking its own photographs should capture JPEG**, and keep HEIC to the
+one path where it is unavoidable — a picture chosen from the photo library.
+
 ## Next
 
-1. Move to PP-OCRv6 mobile — 1.5 MB against 4.7, and reported to be faster and more accurate.
-3. Batch the recognition calls. Each crop is currently a separate inference.
-4. A `PageRasterizer` trait so scanned PDF pages can be read end to end.
-5. napi-rs, PyO3 and wasm-bindgen bindings.
-6. Benchmark against `oar-ocr` and Tesseract on real scans.
+1. **An orientation classifier.** The projection heuristic in `ocr::image::orient`
+   is measured wrong five times out of five on real photographs, and the retry
+   that covers for it costs a second inference pass on every page it saves.
+   PaddleOCR ships a 0.6 MB one; that is the right fix, and guessing at a better
+   projection statistic is not.
+2. Move to PP-OCRv6 mobile — 1.5 MB against 4.7, and reported to be faster and
+   more accurate.
+3. napi-rs, PyO3 and wasm-bindgen bindings.
+4. Benchmark against `oar-ocr` and Tesseract on real scans.
+
+Two entries were removed from this list on 10 August 2026 because they were
+already done and the list had not noticed: recognition batches through
+`Recognizer::recognize_batch` (measured, and defaulted **off** — see
+`readany-ocr`), and the rasteriser seam exists as `pdf::render::Rasterise`.
 
 ## Not supported
 

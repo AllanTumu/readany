@@ -227,11 +227,20 @@ fn inspect_pdf(bytes: &[u8]) -> Result<PdfPlan> {
 /// Recognise an image by its own signature. `anydoc` has no image formats, so
 /// this is the boundary between "a document" and "a picture of one".
 fn is_image(bytes: &[u8]) -> bool {
-    image::ImageReader::new(std::io::Cursor::new(bytes))
+    if image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()
         .and_then(|r| r.format())
         .is_some()
+    {
+        return true;
+    }
+    // HEIC is a photograph whether or not this build can open it, and calling
+    // it `Unknown` would be the wrong sentence about the commonest file an
+    // iPhone produces. Routed as an image, it reaches the decoder and gets a
+    // refusal that names the format; routed as unknown, it gets one that names
+    // nothing. See `crate::ocr::image::DecodeImage`.
+    crate::ocr::image::heif_brand(bytes).is_some()
 }
 
 #[cfg(test)]
@@ -266,6 +275,33 @@ mod tests {
         assert_eq!(plan.route, Route::Image);
         assert!(plan.needs_ocr);
         assert_eq!(plan.summary(), "image, needs OCR");
+    }
+
+    /// A HEIC is a photograph whether or not this build can open it.
+    ///
+    /// The `ftyp` box is written here rather than taken from the corpus: those
+    /// are one real person's receipts and must not enter this repository. Only
+    /// the signature is being tested, and the signature is twelve bytes.
+    ///
+    /// Falsified by removing the `heif_brand` fallback from `is_image`: the
+    /// route becomes `Unknown` and this goes red.
+    #[test]
+    fn a_heic_photograph_routes_to_ocr_even_with_no_decoder_for_it() {
+        let mut heic = vec![0, 0, 0, 24];
+        heic.extend_from_slice(b"ftypheic\0\0\0\0mif1heic");
+        let plan = inspect(&heic).unwrap();
+        assert_eq!(
+            plan.route,
+            Route::Image,
+            "an iPhone photograph must not be reported as an unrecognised file"
+        );
+        assert!(plan.needs_ocr);
+
+        // And an MP4 wears the same box. Claiming every `ftyp` would route the
+        // camera roll's videos into OCR.
+        let mut mp4 = vec![0, 0, 0, 24];
+        mp4.extend_from_slice(b"ftypisom\0\0\0\0isomiso2");
+        assert_eq!(inspect(&mp4).unwrap().route, Route::Unknown);
     }
 
     #[test]

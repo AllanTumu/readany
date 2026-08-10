@@ -12,6 +12,29 @@ pub enum ScanError {
     #[error("image could not be decoded: {0}")]
     Decode(String),
 
+    /// The picture is in a container this build has no decoder for.
+    ///
+    /// **Not the same fact as [`ScanError::Unsupported`] and not the same fact
+    /// as [`ScanError::Decode`].** `Unsupported` means nobody knows what these
+    /// bytes are; `Decode` means the file is damaged. This means the file is
+    /// fine, we know exactly what it is, and *this build* cannot open it — so
+    /// the same photograph read on a phone would succeed.
+    ///
+    /// The case it was written for is HEIC. Every iPhone photograph is HEIC by
+    /// default, and the only pure-Rust option is `libheif`, which is LGPL and
+    /// therefore a real question to link statically into a mobile app. iOS and
+    /// Android both decode it in the platform, through
+    /// [`crate::ocr::image::DecodeImage`]; where nothing does, **a named
+    /// refusal is a valid answer** and this is it.
+    ///
+    /// `why` says what would make it work, because an error that only says no
+    /// sends the reader to the wrong problem.
+    #[error("{format}: no decoder in this build — {why}")]
+    NeedsPlatformDecoder {
+        format: &'static str,
+        why: &'static str,
+    },
+
     #[error("no text was found in the image")]
     NoText,
 

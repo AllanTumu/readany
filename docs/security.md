@@ -76,7 +76,7 @@ returns is checked against the pixel ceiling a second time on the way back.
 |---|---|---|
 | Input size | 50 MB | `read_with`, before sniffing |
 | Pages | 200 | `read_with`, from the route plan |
-| Rendered/decoded pixels per page | 40 M | `decode_bytes`, from the header |
+| Rendered/decoded pixels per page | 40 M | `decode_bytes`, from the header; `decode_bytes_using`, from the pixels a platform decoder returned |
 | Decompressed bytes, zip formats | 200 MB | `archive::check`, counted as produced |
 | Zip entry count | 10,000 | `archive::check`, from the directory |
 | Zip nesting depth | 2 | `archive::check`, recursively |
@@ -146,6 +146,14 @@ which bounds every buffer sized from those dimensions downstream.
 It does **not** cover images created inside the pipeline, because they never
 pass through it:
 
+- **platform-decoded pictures** — a HEIC opened by ImageIO or `BitmapFactory`
+  through `ocr::image::DecodeImage` never meets the header check, because the
+  header is in a container this crate cannot parse. The same argument as the
+  platform rasteriser applies and gets the same answer: what the decoder
+  returns is checked against the pixel ceiling on the way back, in
+  `decode_bytes_using`, and `a_platform_decoder_is_still_bounded_by_the_pixel_ceiling`
+  goes red if that check is removed. **A decoder we did not write is not
+  trusted with a limit.**
 - **rendered PDF pages** — built by the rasteriser, not decoded;
 - **crops** from `frame::content_bounds`;
 - **rotations** from `deskew::rotate` and `orient::apply`;
