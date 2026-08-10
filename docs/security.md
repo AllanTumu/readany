@@ -18,27 +18,57 @@ WebAssembly build. The realistic case is a corrupt or awkward document, not an
 attack. That makes it **lower risk, not no risk** — a bomb still freezes their
 tab, and they report it as our bug.
 
+**Mobile.** The user opens their own file, on their own phone, through a native
+binding over the same Rust. The risk profile is the browser's, and the
+mitigations are worse than the browser's in one way and better in another.
+
+Worse: **the thing the operating system kills is the app.** A tab that hangs is
+one tab; a phone under memory pressure loses the whole process, and with it the
+scan the user had not finished. That is measured rather than assumed — during
+the G23 binding spike Android's `lowmemorykiller` took the app mid-run, and the
+run produced no results at all.
+
+Better: a panic really is contained, which in the browser it is not. Every
+`extern "C"` entry point wraps its body in `catch_unwind` and returns a value,
+so a panic in Rust becomes an error the interface can show. This is a property
+of the FFI shim and not of any particular binding — measured both ways on an
+arm64 device, with and without the guard, and the unguarded control aborts the
+process with `SIGABRT` inside the Rust library. **It holds only for as long as
+every entry point keeps its guard**, which is why the guard is a rule in
+`sk-core` rather than a habit.
+
 ## What each surface can promise
 
-| Mitigation | Server | Browser |
-|---|---|---|
-| Pre-flight decompression cap | yes | yes |
-| Byte, page and pixel ceilings | yes | yes |
-| Checked arithmetic on untrusted numbers | yes | yes |
-| Wall-clock kill | yes | **no** |
-| Memory ceiling | yes (`setrlimit`) | **no** — only the 4 GB WASM address space |
-| Process isolation | yes | **no** |
-| Panic containment | yes (worker dies, service lives) | **no** — the tab's call stack |
+| Mitigation | Server | Browser | Mobile |
+|---|---|---|---|
+| Pre-flight decompression cap | yes | yes | yes |
+| Byte, page and pixel ceilings | yes | yes | yes |
+| Checked arithmetic on untrusted numbers | yes | yes | yes |
+| Wall-clock kill | yes | **no** | **no** |
+| Memory ceiling | yes (`setrlimit`) | **no** — only the 4 GB WASM address space | **no** — and the OS kills the **app**, not the job |
+| Process isolation | yes | **no** | **no** — one process, holding the user's work |
+| Panic containment | yes (worker dies, service lives) | **no** — the tab's call stack | **yes**, at every `extern "C"`, via `catch_unwind` |
 
 **Every `no` is a promise we cannot make, and the frontend has to know before
 it is designed.** In the browser there is no process to kill, no `fork`, no
-`setrlimit`, and no way to stop a computation that has begun. The countable
-limits still apply because they are checked before the work starts; everything
-that depends on stopping work in progress does not exist there.
+`setrlimit`, and no way to stop a computation that has begun. On a phone it is
+the same list, with the added point that there is no *spare* process either —
+on the server the worker is the thing we are willing to lose, and mobile has
+nothing playing that role. The countable limits still apply because they are
+checked before the work starts; everything that depends on stopping work in
+progress does not exist on either surface.
 
-The practical consequence: on the browser, refuse early and generously. A file
-that would be *killed* on the server must be *refused* in the tab, because
-killing is not available.
+The practical consequence, and it is the same sentence for both: **refuse early
+and generously. A file that would be *killed* on the server must be *refused*
+on the device, before the work starts**, because killing is not available and
+what would be killed is not ours to spend.
+
+Concretely, on mobile that means the ceilings are enforced in Rust — in
+`sk-core`'s `sk_inspect` for the input size and in its `PlatformRasteriser` for
+pages, page size and pixels — and **not** in Kotlin or Swift. A limit written
+once in Kotlin and again in Swift is a limit enforced once; and because the
+platform renderer is called through a C vtable rather than trusted, what it
+returns is checked against the pixel ceiling a second time on the way back.
 
 ## Limits
 
@@ -58,6 +88,12 @@ The last two cannot be enforced inside the process doing the work. Rust has no
 safe way to stop a thread, so a parser in a loop can only be stopped by killing
 a process. That is why the worker boundary exists and why every other limit
 sits inside it.
+
+On the browser and on mobile there is no such boundary, so those two rows are
+not "enforced elsewhere" — they are **absent**, and the countable limits above
+them are the whole defence. The values do not change per surface: a 50 MB
+ceiling is 50 MB everywhere, because a document that is too large to be worth
+reading on a server is not more worth reading on a phone.
 
 ## Findings
 
