@@ -144,6 +144,17 @@ pub fn decode_bytes_using(
         return Err(match heif_brand(bytes) {
             Some(format) => ScanError::NeedsPlatformDecoder {
                 format,
+                // Named per target, because a refusal suggesting a remedy the
+                // reader cannot follow is barely better than a silent one. A
+                // browser has no HEIC decoder to lend and cannot be given one,
+                // so telling it about ImageIO is telling it about somebody
+                // else's machine — the same defect as `error.rs` naming an
+                // `Options::pdf_password` field that did not exist.
+                #[cfg(target_arch = "wasm32")]
+                why: "this build links no decoder for it, and a browser has \
+                      none to lend — WebAssembly cannot decode HEIC today, so \
+                      convert the photograph to JPEG or PNG before sending it",
+                #[cfg(not(target_arch = "wasm32"))]
                 why: "this build links no decoder for it — iOS decodes it with \
                       ImageIO and Android with BitmapFactory, through \
                       readany::ocr::image::DecodeImage",
@@ -384,4 +395,38 @@ mod tests {
         decode_bytes_using(&ftyp(b"heic"), &tight, Some(&StubDecoder(20, 20)))
             .expect("400 pixels is within it");
     }
+
+    /// The refusal names a remedy *this* target can follow.
+    ///
+    /// Two targets, two answers, because a refusal pointing at somebody else's
+    /// platform is the shape `error.rs` already shipped once: "supply one with
+    /// `Options::pdf_password`", naming a field that did not exist. A browser
+    /// cannot be handed ImageIO.
+    ///
+    /// Asserted on substance rather than on the sentence, so rewording does not
+    /// fail it — but swapping which target gets which remedy does. Verified by
+    /// swapping the two `cfg`s and watching this go red.
+    #[test]
+    fn the_heic_refusal_names_a_remedy_this_target_can_follow() {
+        // A minimal ISO base-media header carrying an `heic` brand.
+        // `heif_brand` reads the `ftyp` box and nothing else, so this routes.
+        let mut heic = vec![0u8, 0, 0, 24];
+        heic.extend_from_slice(b"ftypheic");
+        heic.extend_from_slice(&[0u8; 12]);
+
+        let err = decode_bytes_using(&heic, &crate::limits::Limits::default(), None)
+            .expect_err("HEIC without a decoder must refuse");
+        let why = format!("{err}");
+
+        if cfg!(target_arch = "wasm32") {
+            assert!(why.contains("JPEG"), "a browser needs a remedy it can follow: {why}");
+            assert!(!why.contains("ImageIO"), "a browser cannot use ImageIO: {why}");
+        } else {
+            assert!(
+                why.contains("ImageIO") || why.contains("BitmapFactory"),
+                "a platform build should name its decoders: {why}"
+            );
+        }
+    }
+
 }
