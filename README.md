@@ -182,6 +182,49 @@ Both rows were measured with the Chinese `ch_PP-OCRv4_rec` recogniser, on an ASC
 
 Errors cut by 53%. `OUICXMART` became `QUICKMART`, `MitkZL8.500` became `Milk2L8.500`, and `TOTAL T8,700` became `TOTAL 18,700` — the figure that actually matters on a receipt. Confidence rose from 0.92 to 0.95. The clean and sideways pages improved too: `Kampela` is now read correctly as `Kampala`.
 
+## Handwriting is marked, never guessed
+
+A restaurant tip is written in by hand, and a guessed tip is a wrong tax record
+rather than a slightly worse one. Handwriting **recognition** is a decided
+"never build" — no small model does it on a CPU — so this crate does the other
+half: it notices that a region was probably made by a pen, and then refuses to
+say what it says.
+
+A marked region becomes an `ocr::HumanRegion`, which **has no text field**. The
+string the recogniser produced is dropped at the moment of the judgement, into a
+type with nowhere to hold it, so nothing downstream has to remember not to use
+it. In the markdown the region appears in its own column of its own row as
+`[handwritten]` — so `TOTAL [handwritten]` is distinguishable from `TOTAL`, and
+neither is mistakable for a figure. There is no option to turn the marker off.
+
+The decision is made from the pixels alone: the spread of stroke thickness, taken
+from the ridge of a distance transform, and how far the foot of the ink wanders
+off a robustly fitted straight line. **Recognition confidence is recorded and not
+consulted**, and that was measured rather than assumed — see
+`ocr::human::Floors`. Adding "the recogniser was unsure" to the rule removed two
+to four marked regions to save one false positive, because a *legible*
+handwritten figure is read confidently: the drawn figures came back at a median
+of 0.866 where the real printed regions sat at 0.982 with a p10 of 0.577. A
+confidence score and the text it scores also come out of one forward pass, so
+they are not two witnesses.
+
+**What is real in the numbers and what is not.** The negatives are real: 268
+printed regions across seven photographed receipts, none of them handwriting,
+because the corpus is card payments and nobody wrote on any of them. The
+positives are **synthetic** — pen strokes drawn onto those same real photographs
+by `readany-ocr/examples/handwriting.rs`, which also draws the identical glyphs
+with one width and one baseline as a control.
+
+| At the shipped floors | Result |
+|---|---|
+| real printed regions marked | **2 of 268** |
+| synthetic pen regions marked | 6 of 8 |
+| synthetic machine-drawn control marked | **0 of 16** |
+
+And the cost end to end, over the whole product path on the same seven receipts,
+run once with the marking on and once with it off: 262 regions read against 258,
+and **not one verdict, field, item, tax band or check changed**.
+
 ## Status
 
 | Part | State |
@@ -195,6 +238,7 @@ Errors cut by 53%. `OUICXMART` became `QUICKMART`, `MitkZL8.500` became `Milk2L8
 | Skew correction | Working |
 | Orientation | **Works on scans, not on photographs** — read the correction under [Measured](#measured) before trusting `rotation` |
 | CTC decoding, reading order, Markdown assembly | Working |
+| Handwriting marked and withheld | Working — **negatives measured on real receipts, positives synthetic** |
 | Text recognition backends | Traits defined here; implementation is separate |
 | PDF page rasterising | Not bundled by design; supply your own |
 | Node, Python, WASM bindings | Not started |

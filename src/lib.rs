@@ -41,6 +41,23 @@ pub use route::{inspect, inspect_named, PdfKind, PdfPlan, Plan, Route};
 use std::path::Path;
 
 /// Where one page's text came from.
+///
+/// # There is no `Human` here, and that is a decision
+///
+/// The product this engine serves paints four colours, and the fourth is
+/// handwriting: *marked for a person, never guessed*. It is not a variant of
+/// this enum, because this enum answers a question about a **page** and
+/// handwriting is a fact about a **region**. The case the rule exists for is a
+/// restaurant receipt whose printed total was read perfectly and whose tip was
+/// written in by hand: the page's text came from pixels, so it is `Ocr`, and
+/// saying otherwise about the whole page would be wrong about every printed
+/// line on it.
+///
+/// A marked region is [`ocr::HumanRegion`], it is carried per page on
+/// [`Page::human_regions`] and per line on [`ocr::TextLine::human`], and the
+/// type has no text field at all. Putting the mark at page level would have
+/// invited a consumer to colour a badge and think the rule was kept, when the
+/// rule is about which *cell* a person has to be asked about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// Extracted from the file's own text layer.
@@ -60,6 +77,14 @@ pub struct Page {
     pub origin: Origin,
     /// Present when the page was recognised, not extracted.
     pub confidence: Option<f32>,
+    /// Regions on this page that were marked as handwritten and deliberately
+    /// not read.
+    ///
+    /// Each one also appears in `markdown`, in its own place on its own row, as
+    /// [`ocr::HUMAN_MARK`]. This field carries the geometry as well, so a
+    /// reader can be shown *where* rather than only told that somewhere on this
+    /// page a person wrote something.
+    pub human_regions: Vec<ocr::HumanRegion>,
 }
 
 /// The result of reading a file.
@@ -77,13 +102,34 @@ pub struct Document {
     pub ocr_pages: Vec<u32>,
     /// 1-indexed pages that needed OCR and did not get it.
     pub unresolved_pages: Vec<u32>,
+    /// 1-indexed pages carrying at least one region marked as handwritten.
+    ///
+    /// Named beside `unresolved_pages` on purpose, because it is the same class
+    /// of fact: part of this document was not read, and a caller is being told
+    /// rather than left to notice. The difference between the two is *why*.
+    /// An unresolved page needed OCR and there was none; a marked region had
+    /// OCR, and the engine looked at what came back and declined to assert it.
+    pub human_pages: Vec<u32>,
     pub processing_time_ms: u64,
 }
 
 impl Document {
     /// True when every page that needed reading was read.
+    ///
+    /// **A marked handwritten region does not make a document incomplete**, and
+    /// the distinction is worth stating rather than leaving to be discovered.
+    /// Incompleteness here means a page produced no text and might have. A
+    /// receipt with a handwritten tip is complete: everything printed on it was
+    /// read, and the one thing that was not is named, positioned, and present
+    /// in the markdown. Ask [`Document::needs_a_person`] for that.
     pub fn is_complete(&self) -> bool {
         self.unresolved_pages.is_empty()
+    }
+
+    /// True when some part of this document was marked for a person rather than
+    /// read.
+    pub fn needs_a_person(&self) -> bool {
+        !self.human_pages.is_empty()
     }
 
     /// A short account of what was done, suitable for a log or an audit trail.
@@ -93,12 +139,15 @@ impl Document {
             .iter()
             .filter(|p| p.origin == Origin::Text)
             .count();
+        let marked: usize = self.pages.iter().map(|p| p.human_regions.len()).sum();
         format!(
-            "{} page(s): {} extracted, {} recognised, {} unresolved, in {}ms",
+            "{} page(s): {} extracted, {} recognised, {} unresolved, \
+             {} marked for a person, in {}ms",
             self.pages.len(),
             text,
             self.ocr_pages.len(),
             self.unresolved_pages.len(),
+            marked,
             self.processing_time_ms
         )
     }
@@ -220,6 +269,7 @@ pub fn read_with(bytes: &[u8], options: &Options) -> Result<Document> {
                 markdown,
                 origin: Origin::Text,
                 confidence: None,
+                human_regions: Vec::new(),
             });
         }
         Route::Pdf(pdf) => {
@@ -245,6 +295,11 @@ pub fn read_with(bytes: &[u8], options: &Options) -> Result<Document> {
         .filter(|p| p.origin == Origin::Unresolved)
         .map(|p| p.number)
         .collect();
+    let human_pages: Vec<u32> = pages
+        .iter()
+        .filter(|p| !p.human_regions.is_empty())
+        .map(|p| p.number)
+        .collect();
 
     if options.strict && !unresolved_pages.is_empty() {
         return Err(ReadError::OcrRequired {
@@ -260,6 +315,7 @@ pub fn read_with(bytes: &[u8], options: &Options) -> Result<Document> {
         pages,
         ocr_pages,
         unresolved_pages,
+        human_pages,
         processing_time_ms: watch.elapsed_ms(),
     })
 }
@@ -288,6 +344,7 @@ fn read_pdf_pages(bytes: &[u8], plan: &PdfPlan, _options: &Options) -> Result<Ve
                 markdown: page.markdown,
                 origin: Origin::Text,
                 confidence: None,
+                human_regions: Vec::new(),
             });
             continue;
         }
@@ -300,6 +357,7 @@ fn read_pdf_pages(bytes: &[u8], plan: &PdfPlan, _options: &Options) -> Result<Ve
             markdown: String::new(),
             origin: Origin::Unresolved,
             confidence: None,
+            human_regions: Vec::new(),
         });
     }
 
@@ -316,6 +374,11 @@ fn read_image_page(bytes: &[u8], options: &Options) -> Result<Page> {
                 markdown,
                 origin: Origin::Ocr,
                 confidence: Some(result.confidence()),
+                human_regions: result
+                    .human_regions()
+                    .into_iter()
+                    .map(|(_, r)| *r)
+                    .collect(),
             })
         }
         None => Ok(Page {
@@ -323,6 +386,7 @@ fn read_image_page(bytes: &[u8], options: &Options) -> Result<Page> {
             markdown: String::new(),
             origin: Origin::Unresolved,
             confidence: None,
+            human_regions: Vec::new(),
         }),
     }
 }
@@ -360,6 +424,7 @@ mod tests {
                         quad: ocr::Quad::from_rect(0.0, 0.0, 100.0, 16.0),
                         confidence: 0.88,
                     }],
+                    human: Vec::new(),
                     baseline_y: 8.0,
                 }],
                 width: 200,
@@ -446,6 +511,93 @@ mod tests {
         )
         .unwrap();
         assert!(doc.markdown.starts_with("<!-- Page 1 -->"));
+    }
+
+    /// An OCR backend that read one cell and marked another.
+    struct OcrWithAMark;
+    impl OcrBackend for OcrWithAMark {
+        fn read_image(&self, _bytes: &[u8]) -> ocr::Result<ScanResult> {
+            let ink = ocr::Ink {
+                stroke_width: 3.0,
+                stroke_variation: 1.1,
+                baseline_drift: 0.2,
+                coverage: 0.2,
+            };
+            Ok(ScanResult {
+                lines: vec![TextLine {
+                    boxes: vec![TextBox {
+                        text: "TIP".to_string(),
+                        quad: ocr::Quad::from_rect(0.0, 0.0, 40.0, 16.0),
+                        confidence: 0.99,
+                    }],
+                    human: vec![ocr::HumanRegion {
+                        quad: ocr::Quad::from_rect(60.0, 0.0, 40.0, 16.0),
+                        evidence: ocr::Evidence {
+                            ink,
+                            confidence: 0.97,
+                            page_confidence: 0.99,
+                        },
+                    }],
+                    baseline_y: 8.0,
+                }],
+                width: 200,
+                height: 100,
+                rotation: 0,
+                skew: 0.0,
+                processing_time_ms: 1,
+                prepare_ms: 0,
+                detect_ms: 0,
+                recognize_ms: 1,
+            })
+        }
+    }
+
+    /// **What a consumer of a whole document is handed.**
+    ///
+    /// The mark is in the markdown, in the marked cell's own column, so a row
+    /// whose figure was written by hand does not read as a row that had no
+    /// figure. The page names the region so it can be drawn on screen, and the
+    /// document names the page.
+    #[test]
+    fn a_marked_region_reaches_the_document_in_place_and_by_name() {
+        let doc = read_with(
+            &png(),
+            &Options {
+                ocr: Some(&OcrWithAMark),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(doc.markdown.trim(), format!("TIP {}", ocr::HUMAN_MARK));
+        assert_eq!(doc.human_pages, vec![1]);
+        assert!(doc.needs_a_person());
+        assert_eq!(doc.pages[0].human_regions.len(), 1);
+        assert!(doc.receipt().contains("1 marked for a person"));
+
+        // Complete, and needing a person, are different facts. Everything the
+        // page printed was read; the one thing that was not is named.
+        assert!(doc.is_complete());
+        assert_eq!(doc.pages[0].origin, Origin::Ocr);
+    }
+
+    /// The same document with nothing marked: no mark in the markdown, no page
+    /// named, and `needs_a_person` false. Without this the assertions above
+    /// would pass for an implementation that marked unconditionally.
+    #[test]
+    fn a_document_with_nothing_written_on_it_names_nobody() {
+        let doc = read_with(
+            &png(),
+            &Options {
+                ocr: Some(&StubOcr("TIP")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!doc.markdown.contains(ocr::HUMAN_MARK));
+        assert!(doc.human_pages.is_empty());
+        assert!(!doc.needs_a_person());
+        assert!(doc.receipt().contains("0 marked for a person"));
     }
 
     #[test]

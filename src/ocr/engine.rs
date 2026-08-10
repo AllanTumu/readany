@@ -110,6 +110,16 @@ pub struct ScanOptions {
     /// you when to ask for it. `docs/ocr-dpi-sweep.md` has the whole table,
     /// including the control proving the gate can fire at all.
     pub retry_when_unsure: bool,
+    /// Where handwriting has to stand before a region is marked and its
+    /// recognised text discarded.
+    ///
+    /// The same setting on every profile, because a hand can write on a till
+    /// roll, on a photocopied form and on a page that was later scanned to a
+    /// PDF, and none of the three profiles is about the pen. See
+    /// [`super::human::Floors`] for the numbers and
+    /// [`super::human::Floors::never`] for the way to turn the marking off,
+    /// which exists so that it can be measured.
+    pub handwriting: super::human::Floors,
 }
 
 impl Default for ScanOptions {
@@ -134,6 +144,7 @@ impl ScanOptions {
             fix_skew: true,
             confidence_floor: 0.5,
             retry_when_unsure: true,
+            handwriting: super::human::Floors::MEASURED,
         }
     }
 
@@ -177,6 +188,7 @@ impl ScanOptions {
             // the gate fires on no page this engine has ever been shown. See
             // `retry_when_unsure`.
             retry_when_unsure: false,
+            handwriting: super::human::Floors::MEASURED,
         }
     }
 
@@ -231,6 +243,7 @@ impl ScanOptions {
             fix_skew: true,
             confidence_floor: 0.5,
             retry_when_unsure: true,
+            handwriting: super::human::Floors::MEASURED,
         }
     }
 }
@@ -488,9 +501,47 @@ impl<D: Detector, R: Recognizer> Engine<D, R> {
         let read = self.recognizer.recognize_batch(&crops)?;
         let recognize_ms = stage.elapsed_ms();
 
+        // Which regions the pen made, decided before anything is allowed to
+        // keep what the recogniser said about them.
+        //
+        // The order matters and is the whole invariant. The recogniser has
+        // already produced characters for every crop — it always does, there is
+        // no way to ask it not to — and this is the one point at which those
+        // characters exist and can still be dropped rather than dropped later.
+        // Below, a marked region is turned into a `HumanRegion`, which has no
+        // field to put them in. Nothing downstream has to remember not to use
+        // them, because nothing downstream can reach them.
+        let ink: Vec<Option<super::human::Ink>> =
+            crops.iter().map(super::human::measure).collect();
+        let confidences: Vec<f32> = read
+            .iter()
+            .filter(|(text, _)| !text.trim().is_empty())
+            .map(|(_, c)| *c)
+            .collect();
+        let page_confidence = super::human::page_reference(&confidences);
+
         let mut boxes = Vec::with_capacity(quads.len());
-        for (quad, (text, confidence)) in quads.into_iter().zip(read) {
+        let mut human = Vec::new();
+        for ((quad, (text, confidence)), ink) in quads.into_iter().zip(read).zip(ink) {
             if text.trim().is_empty() {
+                continue;
+            }
+            if super::human::judge(ink, &options.handwriting) {
+                // `text` is moved into nothing and goes out of scope here.
+                human.push(super::human::HumanRegion {
+                    quad,
+                    evidence: super::human::Evidence {
+                        // `judge` returned true, so `ink` was `Some`.
+                        ink: ink.unwrap_or(super::human::Ink {
+                            stroke_width: 0.0,
+                            stroke_variation: 0.0,
+                            baseline_drift: 0.0,
+                            coverage: 0.0,
+                        }),
+                        confidence,
+                        page_confidence,
+                    },
+                });
                 continue;
             }
             boxes.push(TextBox {
@@ -500,7 +551,8 @@ impl<D: Detector, R: Recognizer> Engine<D, R> {
             });
         }
 
-        let lines = super::layout::assemble(boxes, width as f32);
+        let mut lines = super::layout::assemble(boxes, width as f32);
+        super::layout::attach_human(&mut lines, human);
 
         Ok(ScanResult {
             lines,
@@ -976,5 +1028,193 @@ mod tests {
         // And the reading it kept is genuinely the less confident one, or the
         // test proves nothing about the comparison.
         assert!(result.confidence() < 0.49);
+    }
+}
+
+#[cfg(test)]
+mod handwriting_tests {
+    use super::*;
+    use crate::ocr::detect::Detector;
+    use crate::ocr::human::{Floors, HUMAN_MARK};
+    use crate::ocr::recognize::Recognizer;
+
+    /// A page with two rows: a printed label on the left of each, and on the
+    /// second row a figure whose strokes vary in width and whose feet bend.
+    ///
+    /// The right-hand cell of row 2 is the only handwriting on the page.
+    fn page_with_one_written_cell() -> Vec<u8> {
+        let (w, h) = (400u32, 200u32);
+        let mut img = GrayImage::from_pixel(w, h, ::image::Luma([255u8]));
+
+        // Three printed cells: even stems, flat feet.
+        for (ox, oy) in [(20u32, 20u32), (20, 120), (220, 20)] {
+            let mut x = ox;
+            while x + 4 < ox + 140 {
+                for y in oy..(oy + 44) {
+                    for dx in 0..4 {
+                        img.put_pixel(x + dx, y, ::image::Luma([0u8]));
+                    }
+                }
+                x += 12;
+            }
+        }
+
+        // One written cell.
+        let (ox, oy) = (220u32, 120u32);
+        let mut x = ox;
+        let mut n = 0u32;
+        while x + 10 < ox + 140 {
+            let thickness = 2 + (n % 6);
+            let phase = (x - ox) as f32 / 140.0 * std::f32::consts::TAU * 2.0;
+            let foot = ((oy as f32 + 40.0 + phase.sin() * 14.0) as u32).clamp(oy + 16, oy + 60);
+            for y in oy..foot {
+                for dx in 0..thickness {
+                    img.put_pixel(x + dx, y, ::image::Luma([0u8]));
+                }
+            }
+            x += thickness + 8;
+            n += 1;
+        }
+
+        let mut bytes = Vec::new();
+        ::image::DynamicImage::ImageLuma8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                ::image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    /// The four cells, in the positions they were drawn.
+    struct FourCells;
+    impl Detector for FourCells {
+        fn detect(&self, _image: &GrayImage) -> Result<Vec<Quad>> {
+            Ok(vec![
+                Quad::from_rect(18.0, 18.0, 146.0, 50.0),
+                Quad::from_rect(218.0, 18.0, 146.0, 50.0),
+                Quad::from_rect(18.0, 118.0, 146.0, 50.0),
+                Quad::from_rect(218.0, 118.0, 146.0, 50.0),
+            ])
+        }
+    }
+
+    /// Reads every cell perfectly and confidently, including the written one.
+    ///
+    /// **This is the point of the test.** The recogniser is not allowed to be
+    /// the thing that notices: it hands back `9,99` at 0.99 for a figure a hand
+    /// wrote, which is precisely the failure the product rule exists to stop —
+    /// a plausible tip, confidently asserted, into a tax record.
+    struct ReadsEverythingConfidently;
+    impl Recognizer for ReadsEverythingConfidently {
+        fn recognize(&self, _crop: &GrayImage) -> Result<(String, f32)> {
+            Ok(("9,99".to_string(), 0.99))
+        }
+    }
+
+    fn options(handwriting: Floors) -> ScanOptions {
+        ScanOptions {
+            crop_to_content: false,
+            flatten_lighting: false,
+            fix_orientation: false,
+            fix_skew: false,
+            retry_when_unsure: false,
+            handwriting,
+            ..Default::default()
+        }
+    }
+
+    /// **The invariant: the marked cell carries no text, anywhere.**
+    ///
+    /// Not "carries text flagged as doubtful" — carries none. The string the
+    /// recogniser produced for that crop is dropped inside `scan_once`, into a
+    /// type with no field to hold it, and the assertions below are the three
+    /// places a consumer could otherwise have found it: the result's text, the
+    /// line's boxes, and the marked region itself.
+    #[test]
+    fn a_written_cell_is_marked_and_its_recognised_text_does_not_exist() {
+        let engine = Engine::new(FourCells, ReadsEverythingConfidently)
+            .with_options(options(Floors::MEASURED));
+        let result = engine.scan_bytes(&page_with_one_written_cell()).unwrap();
+
+        let marked = result.human_regions();
+        assert_eq!(
+            marked.len(),
+            1,
+            "expected exactly the written cell to be marked, got {} region(s); \
+             the page reads {:?}",
+            marked.len(),
+            result.text()
+        );
+
+        // Three cells were read, not four.
+        let read: usize = result.lines.iter().map(|l| l.boxes.len()).sum();
+        assert_eq!(read, 3, "a marked cell must not also be a read cell");
+
+        // The mark stands in the marked cell's own place: second row, right.
+        let rows: Vec<String> = result.lines.iter().map(|l| l.text()).collect();
+        assert!(
+            rows.iter().any(|r| r == &format!("9,99 {HUMAN_MARK}")),
+            "the mark is not where the writing was: {rows:?}"
+        );
+        assert!(
+            result.needs_a_person(),
+            "the page has to say that it needs one"
+        );
+
+        // And there is no fourth `9,99` anywhere. Three cells were read, so the
+        // string appears three times and not four.
+        assert_eq!(
+            result.text().matches("9,99").count(),
+            3,
+            "the recogniser's reading of the written cell survived: {:?}",
+            result.text()
+        );
+    }
+
+    /// The control, and it is what makes the test above mean something.
+    ///
+    /// Same page, same backends, marking turned off. Every cell is now read and
+    /// the confident wrong answer is handed back — which is the behaviour before
+    /// this feature, stated so it cannot be reintroduced quietly.
+    #[test]
+    fn with_the_marking_off_the_same_page_asserts_the_written_cell() {
+        let engine = Engine::new(FourCells, ReadsEverythingConfidently)
+            .with_options(options(Floors::never()));
+        let result = engine.scan_bytes(&page_with_one_written_cell()).unwrap();
+
+        assert!(result.human_regions().is_empty());
+        assert!(!result.needs_a_person());
+        assert_eq!(
+            result.text().matches("9,99").count(),
+            4,
+            "with marking off all four cells must be asserted, or the test \
+             above is not measuring the marking: {:?}",
+            result.text()
+        );
+    }
+
+    /// A page of nothing but print keeps every cell. Without this, a `judge`
+    /// that returned `true` for everything would pass the first test.
+    #[test]
+    fn a_page_of_print_is_read_in_full() {
+        struct ThreePrintedCells;
+        impl Detector for ThreePrintedCells {
+            fn detect(&self, _image: &GrayImage) -> Result<Vec<Quad>> {
+                Ok(vec![
+                    Quad::from_rect(18.0, 18.0, 146.0, 50.0),
+                    Quad::from_rect(218.0, 18.0, 146.0, 50.0),
+                    Quad::from_rect(18.0, 118.0, 146.0, 50.0),
+                ])
+            }
+        }
+        let engine = Engine::new(ThreePrintedCells, ReadsEverythingConfidently)
+            .with_options(options(Floors::MEASURED));
+        let result = engine.scan_bytes(&page_with_one_written_cell()).unwrap();
+        assert!(
+            result.human_regions().is_empty(),
+            "printed cells were marked"
+        );
+        assert_eq!(result.text().matches("9,99").count(), 3);
     }
 }

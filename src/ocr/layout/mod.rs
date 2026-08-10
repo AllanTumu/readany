@@ -2,4 +2,4 @@
 
 pub mod reading_order;
 
-pub use reading_order::{assemble, group_into_lines};
+pub use reading_order::{assemble, attach_human, group_into_lines};

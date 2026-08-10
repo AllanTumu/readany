@@ -64,6 +64,7 @@ pub fn group_into_lines(mut boxes: Vec<TextBox>) -> Vec<TextLine> {
                 line.iter().map(|b| b.quad.center_y()).sum::<f32>() / line.len() as f32;
             TextLine {
                 boxes: line,
+                human: Vec::new(),
                 baseline_y,
             }
         })
@@ -114,6 +115,65 @@ fn split_columns(boxes: Vec<TextBox>, page_width: f32) -> Vec<Vec<TextBox>> {
     }
     columns.retain(|c| !c.is_empty());
     columns
+}
+
+/// Put each marked region on the line it belongs to.
+///
+/// Marked regions are held out of [`assemble`] because they are not text and
+/// [`TextLine`] holds text — but a region that is not attached to a row is
+/// almost useless. "There is handwriting somewhere on this receipt" does not
+/// tell anyone which figure is missing; "the row that says `TOTAL` has a
+/// handwritten cell in it" does.
+///
+/// A region joins the line whose vertical span it overlaps most, using the same
+/// `LINE_OVERLAP` rule the text boxes were grouped by, so a written figure
+/// beside a printed label lands on the label's row. A region that overlaps no
+/// line becomes a line of its own, in reading order — writing in a margin is
+/// still writing, and dropping it because it sat beside nothing is exactly the
+/// silent omission this engine refuses.
+pub fn attach_human(lines: &mut Vec<TextLine>, regions: Vec<crate::ocr::human::HumanRegion>) {
+    for region in regions {
+        let (_, ry, _, rh) = region.quad.bbox();
+        let best = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                let (top, bottom) = line.span()?;
+                let shared = (bottom.min(ry + rh) - top.max(ry)).max(0.0);
+                let shorter = (bottom - top).min(rh).max(1.0);
+                let fraction = shared / shorter;
+                (fraction >= LINE_OVERLAP).then_some((i, fraction))
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i);
+
+        match best.and_then(|i| lines.get_mut(i)) {
+            Some(line) => {
+                line.human.push(region);
+                line.human.sort_by(|a, b| {
+                    a.quad
+                        .left()
+                        .partial_cmp(&b.quad.left())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            None => {
+                let baseline_y = region.quad.center_y();
+                let at = lines
+                    .iter()
+                    .position(|l| l.baseline_y > baseline_y)
+                    .unwrap_or(lines.len());
+                lines.insert(
+                    at,
+                    TextLine {
+                        boxes: Vec::new(),
+                        human: vec![region],
+                        baseline_y,
+                    },
+                );
+            }
+        }
+    }
 }
 
 /// Midpoints of every run of empty bins wide enough to be a gutter,

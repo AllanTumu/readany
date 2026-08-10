@@ -60,16 +60,78 @@ pub struct TextBox {
 #[derive(Debug, Clone)]
 pub struct TextLine {
     pub boxes: Vec<TextBox>,
+    /// Regions on this line the engine marked as handwritten and refused to
+    /// read. See [`crate::ocr::human::HumanRegion`]: there is no text on that
+    /// type, so a marked cell cannot be filled by anything downstream.
+    ///
+    /// Empty on almost every line. A line can hold both: a printed label and a
+    /// figure written in beside it is the whole case this exists for.
+    pub human: Vec<super::human::HumanRegion>,
     pub baseline_y: f32,
 }
 
 impl TextLine {
+    /// The line as text, with every marked region standing in its own place.
+    ///
+    /// A row whose amount was written by hand comes back as its printed label
+    /// followed by [`crate::ocr::human::HUMAN_MARK`], in the column the writing
+    /// was in — not as a row that simply had no amount. The two are different
+    /// facts and a consumer is entitled to tell them apart: "there was no
+    /// figure here" and "there was a figure here and we will not tell you what
+    /// it said" lead to different questions being asked of a person.
+    ///
+    /// When the line has no marked region this is exactly the old
+    /// implementation: the boxes' text, joined with spaces.
     pub fn text(&self) -> String {
-        self.boxes
+        if self.human.is_empty() {
+            return self
+                .boxes
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+        let mut cells: Vec<(f32, &str)> = self
+            .boxes
             .iter()
-            .map(|b| b.text.as_str())
+            .map(|b| (b.quad.left(), b.text.as_str()))
+            .chain(
+                self.human
+                    .iter()
+                    .map(|r| (r.quad.left(), super::human::HUMAN_MARK)),
+            )
+            .collect();
+        cells.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        cells
+            .into_iter()
+            .map(|(_, t)| t)
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// The vertical extent of the text on this line, top and bottom.
+    ///
+    /// `None` for a line that holds no text box, which is a line that is
+    /// nothing but a marked region.
+    pub fn span(&self) -> Option<(f32, f32)> {
+        let mut top = f32::MAX;
+        let mut bottom = f32::MIN;
+        for b in &self.boxes {
+            let (_, y, _, h) = b.quad.bbox();
+            top = top.min(y);
+            bottom = bottom.max(y + h);
+        }
+        (bottom > top).then_some((top, bottom))
+    }
+
+    /// True when part of this line was marked for a person rather than read.
+    ///
+    /// Deliberately not folded into [`TextLine::min_confidence`]. A low
+    /// confidence says the engine read something badly; this says the engine
+    /// declined to read at all, and a caller that thresholds the first would
+    /// silently pass a row it should have stopped on.
+    pub fn needs_a_person(&self) -> bool {
+        !self.human.is_empty()
     }
 
     pub fn confidence(&self) -> f32 {
@@ -245,6 +307,30 @@ impl ScanResult {
             .collect()
     }
 
+    /// Every region marked as handwritten, as the index of the line it sits on
+    /// and a reference to the region.
+    ///
+    /// The same shape as [`ScanResult::weak_boxes`] and for the same reason:
+    /// the line index says which row and the quad says which cell, so a person
+    /// can be shown *where*. The references are shared — but here that is not
+    /// the guarantee, because [`crate::ocr::human::HumanRegion`] has no text
+    /// field to fill even with a mutable one. A weak box is a reading the
+    /// engine is unsure of; a marked region is not a reading at all.
+    ///
+    /// Lines are in reading order and regions within a line are left to right.
+    pub fn human_regions(&self) -> Vec<(usize, &super::human::HumanRegion)> {
+        self.lines
+            .iter()
+            .enumerate()
+            .flat_map(|(n, l)| l.human.iter().map(move |r| (n, r)))
+            .collect()
+    }
+
+    /// True when any part of this page was marked for a person.
+    pub fn needs_a_person(&self) -> bool {
+        self.lines.iter().any(TextLine::needs_a_person)
+    }
+
     /// True when the caller should not trust this result.
     ///
     /// This asks about the page as a whole, and it answers with a mean, so it
@@ -278,6 +364,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, &c)| tb("cell", i as f32 * 50.0, c))
                 .collect(),
+            human: Vec::new(),
             baseline_y: 16.0,
         }
     }
@@ -323,6 +410,7 @@ mod tests {
         // best line on the page.
         let l = TextLine {
             boxes: Vec::new(),
+            human: Vec::new(),
             baseline_y: 0.0,
         };
         assert_eq!(l.min_confidence(), 0.0);

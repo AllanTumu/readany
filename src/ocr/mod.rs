@@ -6,6 +6,7 @@
 pub mod detect;
 pub mod engine;
 pub mod error;
+pub mod human;
 pub mod image;
 pub mod layout;
 pub mod markdown;
@@ -15,6 +16,7 @@ pub mod types;
 
 pub use engine::{prepare, prepare_bytes, prepare_bytes_using, Engine, Prepared, ScanOptions};
 pub use error::{Result, ScanError};
+pub use human::{Evidence, Floors, HumanRegion, Ink, HUMAN_MARK};
 pub use markdown::MarkdownOptions;
 pub use types::{Quad, ScanResult, TextBox, TextLine};
 

@@ -134,6 +134,7 @@ mod tests {
                 quad: Quad::from_rect(10.0, y, 200.0, h),
                 confidence,
             }],
+            human: Vec::new(),
             baseline_y: y + h / 2.0,
         }
     }
@@ -215,6 +216,7 @@ mod tests {
                     confidence: 0.99,
                 },
             ],
+            human: Vec::new(),
             baseline_y: 18.0,
         };
         assert!(
@@ -243,6 +245,7 @@ mod tests {
                     confidence: 0.83,
                 },
             ],
+            human: Vec::new(),
             baseline_y: 18.0,
         };
         let md = to_markdown(&result(vec![row]), &MarkdownOptions::default());
