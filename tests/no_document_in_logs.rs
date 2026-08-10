@@ -42,6 +42,28 @@ fn planted_broken() -> Vec<u8> {
     v
 }
 
+/// A PDF that declares itself encrypted, with the token in the one place a
+/// reader is most likely to quote it back.
+///
+/// The encrypted path is the sharpest case in this sweep, because it is the
+/// only one where the reader is holding bytes it could not interpret — and
+/// "could not interpret" is exactly when a library reaches for "here is what I
+/// saw". The document need not be *validly* encrypted for that: it needs to
+/// reach the refusal with the token in scope, which this does without the
+/// hundred lines of RC4 that `tests/encrypted_pdf.rs` needs for the real thing.
+fn planted_encrypted() -> Vec<u8> {
+    let mut v = format!(
+        "%PDF-1.4\n\
+         1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+         2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n\
+         3 0 obj\n<< /Filter /Standard /V 1 /R 2 /P -1 /Note ({TOKEN}) >>\nendobj\n\
+         trailer\n<< /Size 4 /Root 1 0 R /Encrypt 3 0 R /ID [<0123> <0123>] >>\n"
+    )
+    .into_bytes();
+    v.extend_from_slice(b"%%EOF\n");
+    v
+}
+
 fn leaked(haystack: &str, where_: &str) -> Option<String> {
     haystack.contains(TOKEN).then(|| format!("{where_} contains the planted token"))
 }
@@ -62,6 +84,7 @@ fn no_document_content_reaches_any_log_or_error_channel() {
         ("csv", planted_csv()),
         ("xlsx", planted_xlsx()),
         ("broken pdf", planted_broken()),
+        ("encrypted pdf", planted_encrypted()),
     ] {
         let result = readany::read_with(
             &bytes,
@@ -99,6 +122,65 @@ fn no_document_content_reaches_any_log_or_error_channel() {
     assert!(errors_seen > 0, "no error path was exercised, so the test proved nothing");
     assert!(reads_seen > 0, "no successful read was exercised");
     eprintln!("planted-token sweep: {reads_seen} read(s), {errors_seen} error(s) inspected");
+}
+
+/// A password must not reach an error either, and it is a worse leak than the
+/// document.
+///
+/// A document's text is at least the thing the caller asked us to produce. A
+/// password is never output — it is only ever input, and the one input here
+/// that is a secret. It is also the input most likely to end up quoted back,
+/// because the natural way to report a failure is to say what was tried.
+///
+/// [`Rasterise::render_page_with_password`] is the only place in this crate
+/// that takes one. The stub below fails the way a real renderer fails, with the
+/// planted token as the password, and neither the error nor its `Debug` may
+/// carry it. This runs without PDFium: the seam is defined here, so its
+/// contract is testable here.
+#[test]
+fn a_password_does_not_reach_an_error() {
+    use readany::pdf::render::{PageImage, Rasterise};
+
+    /// Fails on every page, which is how a renderer behaves when it was handed
+    /// a document it cannot open.
+    struct Failing;
+    impl Rasterise for Failing {
+        fn page_count(&self, _pdf: &[u8]) -> readany::Result<usize> {
+            Ok(1)
+        }
+        fn render_page(&self, _pdf: &[u8], page: usize, dpi: f32) -> readany::Result<PageImage> {
+            // Deliberately chatty, because a renderer that says nothing cannot
+            // demonstrate that it says nothing *sensitive*. Page and dpi are
+            // not secrets; the password is, and it is not here.
+            Err(readany::ReadError::Pdf(format!(
+                "page {page} could not be rendered at {dpi} dpi"
+            )))
+        }
+    }
+
+    let err = Failing
+        .render_page_with_password(b"%PDF-1.4\n%%EOF\n", 0, 150.0, Some(TOKEN))
+        .expect_err("the stub renderer must fail");
+
+    let mut findings: Vec<String> = Vec::new();
+    for (channel, text) in [("Display", err.to_string()), ("Debug", format!("{err:?}"))] {
+        if let Some(f) = leaked(&text, &format!("password: {channel} of the error")) {
+            findings.push(f);
+        }
+    }
+    // And the two refusals a real renderer returns carry no data at all, so
+    // there is nowhere for a password to hide in them.
+    for (name, e) in [
+        ("PasswordRequired", readany::ReadError::PasswordRequired),
+        ("PasswordRejected", readany::ReadError::PasswordRejected),
+    ] {
+        for (channel, text) in [("Display", e.to_string()), ("Debug", format!("{e:?}"))] {
+            if let Some(f) = leaked(&text, &format!("{name}: {channel}")) {
+                findings.push(f);
+            }
+        }
+    }
+    assert!(findings.is_empty(), "a password escaped:\n  {}", findings.join("\n  "));
 }
 
 // The verdict-surface half of this sweep now lives in `readany-verify`.

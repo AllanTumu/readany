@@ -105,6 +105,40 @@ impl Document {
 }
 
 /// How to read.
+///
+/// # There is no `pdf_password`, and that is a decision rather than an omission
+///
+/// **Encrypted PDFs mostly read already.** The common protected bank statement
+/// carries an owner password only — it restricts printing and copying, not
+/// opening — and the empty user password opens it. Measured on a hand-built
+/// RC4-40 file: the markdown is byte-identical to the same document
+/// unencrypted, with no option set. `tests/encrypted_pdf.rs` pins that, because
+/// nothing documented it and a behaviour nobody has written down is a behaviour
+/// that can be removed by accident.
+///
+/// A PDF with a real *user* password returns [`ReadError::PasswordRequired`].
+/// Passing a password through would need `pdf-inspector` to accept one on the
+/// call this crate reads pages with, and it does not. Its only password-capable
+/// entry points return one concatenated markdown string for the whole document,
+/// and going through them page by page was measured to be a different answer,
+/// not just a slower one:
+///
+/// | Measured on a 12-page document with mixed type sizes | Result |
+/// |---|---|
+/// | pages whose markdown differed from the ordinary route | **11 of 12** |
+/// | pages whose `needs_ocr` verdict differed | 1 |
+/// | cost at the 200-page limit | 1430 ms against 51 ms, **28×** |
+///
+/// The markdown differs because the ordinary route computes font statistics
+/// across the whole document so heading thresholds stay consistent, and the
+/// filtered route sees only the page it was asked for. Wiring a password
+/// through it would mean a PDF reads differently *for having been encrypted*,
+/// and `unresolved_pages` — the accounting this crate exists to keep honest —
+/// would move with it. A password is not worth paying for with that.
+///
+/// A rasteriser is the one place a password is accepted, because rendering
+/// takes a different route entirely: see
+/// [`pdf::render::Rasterise::render_page_with_password`].
 #[derive(Default)]
 pub struct Options<'a> {
     /// The file's name, when the caller knows it.

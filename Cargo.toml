@@ -38,6 +38,10 @@ env_logger = "0.11"
 [dev-dependencies]
 tempfile = "3"
 zip = { version = "5", default-features = false, features = ["deflate-flate2"] }
+# Only to build encrypted PDFs for `tests/encrypted_pdf.rs`. The PDF standard
+# security handler is specified in terms of MD5, so a fixture that encrypts one
+# has no choice; nothing in the library hashes anything with it.
+md-5 = "0.10"
 
 [[bin]]
 name = "readany"

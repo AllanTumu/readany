@@ -131,6 +131,91 @@ That was a one-minute test and it separates the two causes cleanly.
 | dpi and `max_side` both matter once fixed | **PARTLY** — `max_side` moves confidence only; dpi moves almost nothing. Recall saturates at 150 dpi |
 | The crop worked by region, not resolution | **TRUE** — confirmed at 150 dpi |
 
+## The 300 dpi retry, measured 10 August 2026 — and declined
+
+The plan was to re-render a page at 300 dpi when the first read at 150 came
+back below `confidence_floor`, and to measure how often that fired. It was
+measured and it is not being shipped. Two findings, and the second is the one
+that matters.
+
+Harness: `readany-ocr/examples/dpi_retry`.
+
+### It never fires
+
+| Pages read at 150 dpi | Page mean below 0.5 |
+|---|---|
+| 32 pages of 5 real PDFs | **0** |
+| 6 renders of a generated statement, 9pt down to 3pt | **0** |
+
+The weakest-box statistic would not have fired either: 0 of 32. The lowest page
+mean seen on any real page was 0.899, and the lowest weakest-box 0.505.
+
+### Confidence is not a correctness signal here, which is worse
+
+The same generated statement, deliberately rendered at resolutions nobody would
+choose, against exact ground truth — 74 invented strings on the page:
+
+| dpi | boxes found | median box px | fields recovered | page mean | would fire |
+|---|---|---|---|---|---|
+| 150 | 82 | 21.1 | 74/74 | 0.9904 | no |
+| 60 | 82 | 14.3 | 49/74 | 0.9673 | no |
+| 40 | 54 | 8.6 | **0/74** | **0.6468** | **no** |
+| 30 | 6 | 11.5 | 0/74 | 0.4800 | yes |
+
+**At 40 dpi the page gave back not one correct field and reported 0.647.** The
+gate only fires at 30 dpi, where the detector finds six boxes on a whole A4
+page — that is to say, it fires when the page is already gone. A retry hung on
+this number would be dead code that reads as a safety net.
+
+The 30 dpi row is the control. A firing rate of zero is otherwise
+indistinguishable from a broken instrument, so the sweep proves the gate can
+say yes before reporting that it does not.
+
+### But 300 dpi does recover, below about 7 point
+
+Generated 18-row statement, re-typeset at each size, 150 against 300 dpi:
+
+| body pt | median box px @150 | fields @150 | fields @300 | boxes @150 / @300 |
+|---|---|---|---|---|
+| 9 | 21.1 | 74/74 | 74/74 | 82 / 82 |
+| 7 | 17.3 | 72/74 | 74/74 | 82 / 82 |
+| 6 | 17.0 | 62/74 | 74/74 | 82 / 82 |
+| 5 | 14.9 | 69/74 | 74/74 | 82 / 82 |
+| 4 | **14.4** | **58/74** | **74/74** | 82 / 82 |
+| 3 | 11.9 | 23/74 | 72/74 | 79 / 82 |
+
+300 dpi recovered more on five of six sizes and lost nothing on any.
+
+**The 4 point row is the clean one.** Both resolutions detected the identical 82
+boxes, so nothing about detection or line spacing differs — the only thing that
+changed is how many pixels each glyph had, and 16 fields came back. The 3 point
+row is not clean: box count differs there, so spacing is a confound.
+
+This does not contradict the sweep above; it bounds it. **Box recall saturates
+at 150 dpi. Character accuracy does not.** The CaixaBank measurement was made
+on 9-point body text, and this reproduces it exactly at 9 point — 74/74 at both
+resolutions. It is only fine print that 150 dpi loses.
+
+### Why nothing shipped
+
+The signal that predicts the failure is not confidence, it is the median height
+of a detected text box — which the detector has already computed by the time
+the page is read, and which costs nothing to look at. Every read at or above
+20.4 px returned at least 72 of 74 fields; every read at or below 17.3 px lost
+between 2 and 51.
+
+No such gate is being added, because there is nothing yet to gate. **Every real
+page measured sits at 20.6 to 25.1 px**, above the whole degraded range: on the
+documents this product actually has, 150 dpi is already the right answer and a
+retry at any threshold would never run. A constant swept on one generated
+fixture and zero real failures is a constant with no evidence behind it, and
+this file exists because of the last knob that was added before it was
+understood.
+
+What the measurement changes today is two comments that were true and read as
+if they were general: `DEFAULT_DPI` and `ScanOptions::retry_when_unsure` now
+say which type size the saturation was measured at.
+
 ## What is still not true
 
 A rendered CaixaBank page now yields 44 lines with digits, but that is not yet

@@ -87,14 +87,29 @@ pub trait Rasterise {
 
     /// Render one page of a password-protected PDF.
     ///
-    /// Many bank statements are encrypted with an empty owner password, and
-    /// some with the customer's date of birth. The default implementation
-    /// ignores the password and calls [`Rasterise::render_page`], which is
-    /// correct for the empty-password case that a renderer handles silently.
+    /// **This is the only place in the project that takes a password.** The
+    /// text path does not, and cannot: see [`crate::Options`].
     ///
-    /// A renderer that needs a password and was not given a usable one must
-    /// return [`crate::ReadError::PasswordRequired`] rather than guessing.
-    /// Guessing an account number would be worse than failing.
+    /// Many bank statements are encrypted with an owner password only, which a
+    /// renderer opens silently with no password at all. The default
+    /// implementation ignores the password and calls
+    /// [`Rasterise::render_page`], which is correct for exactly that case and
+    /// wrong for no other — a renderer that cannot use a password has nothing
+    /// better to do with one.
+    ///
+    /// An implementation that was given a password must distinguish two
+    /// outcomes, because a caller acts differently on each:
+    ///
+    /// | Situation | Return |
+    /// |---|---|
+    /// | needs a password, none was supplied | [`crate::ReadError::PasswordRequired`] |
+    /// | a password was supplied and did not open it | [`crate::ReadError::PasswordRejected`] |
+    ///
+    /// Neither may guess. Trying an account number would be worse than failing.
+    ///
+    /// **The password must not reach the error, the message or a log.** It is
+    /// the one argument here that is a secret, and both variants above carry no
+    /// data so that there is nowhere for it to go.
     fn render_page_with_password(
         &self,
         pdf: &[u8],
@@ -117,10 +132,35 @@ pub const MAX_SIDE_PX: u32 = 4000;
 ///
 /// **150, not 300.** Measured on a rendered CaixaBank page: 150 and 400 dpi
 /// recover the identical 68 lines and 44 lines-with-digits, and confidence
-/// moves only 0.991 to 0.994. Recall is saturated well below 300.
+/// moves only 0.991 to 0.994.
 ///
 /// So 150 is as accurate, 18% faster, and a quarter of the memory — 2.1 MB a
 /// page against 8.3 MB. See `docs/ocr-dpi-sweep.md`.
+///
+/// # What saturates at 150, and what does not
+///
+/// **Box recall saturates. Character accuracy does not.** That page was set in
+/// 9-point body text, which is what a bank statement uses, and the second sweep
+/// reproduced it exactly there: 74 of 74 known strings recovered at both 150
+/// and 300 dpi. Below about 7 point it stops being true, on a document whose
+/// every value was chosen so the count is exact:
+///
+/// | Body size | Fields recovered at 150 | at 300 | Boxes detected |
+/// |---|---|---|---|
+/// | 9 pt | 74/74 | 74/74 | 82 either way |
+/// | 6 pt | 62/74 | 74/74 | 82 either way |
+/// | 4 pt | **58/74** | **74/74** | 82 either way |
+///
+/// The box count is identical down to 4 point, so the detector is finding every
+/// line at both resolutions and only the recogniser is losing characters —
+/// a glyph 14 px tall upsampled to the recogniser's 48 px input gains no
+/// information it did not have.
+///
+/// The default stays 150 because every real page measured carries text boxes
+/// 20.6 to 25.1 px tall at 150 dpi, well clear of that range. A caller reading
+/// fine print — terms on the back of a receipt, a footnote schedule — should
+/// ask for 300 rather than expect this default to notice, because the engine
+/// cannot: see [`crate::ocr::engine::ScanOptions::retry_when_unsure`].
 ///
 /// This is a *rendered page* default. A photograph is a different problem and
 /// its resolution is whatever the camera gave.

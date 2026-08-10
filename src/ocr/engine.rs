@@ -41,6 +41,33 @@ pub struct ScanOptions {
     ///
     /// This costs a second pass only on the pages that failed, which on that
     /// set was two of seven.
+    ///
+    /// # This is the geometric retry, and it is the only one
+    ///
+    /// A *resolution* retry — read the page again rendered at 300 dpi — is a
+    /// different thing, and it is deliberately not here. The engine could not
+    /// perform one if it were: [`Engine::scan_bytes`] receives an encoded image
+    /// and has never seen the PDF it came from, so only a caller holding both
+    /// the document and a [`crate::pdf::render::Rasterise`] can render it
+    /// again.
+    ///
+    /// It was measured before being declined, because a dpi retry sounds
+    /// obviously good. **The gate this field uses never fires.** Across 32
+    /// pages of five real PDFs and six renders of a generated statement, the
+    /// page mean fell below `confidence_floor` exactly zero times.
+    ///
+    /// Worse, and the actual reason: on this pipeline mean confidence is not a
+    /// correctness signal at all in that regime. The same statement rendered at
+    /// 40 dpi gave back **not one** of its 74 known strings and reported a page
+    /// mean of **0.647** — well above the 0.5 floor. The gate first says yes at
+    /// 30 dpi, where the detector finds six boxes on a whole A4 page.
+    ///
+    /// So a dpi retry hung on this number would be dead code that reads as a
+    /// safety net, and it would cost a second render and a second full
+    /// inference pass to be it. 300 dpi genuinely does recover fine print —
+    /// 58 of 74 fields to 74 of 74 at 4-point type — but confidence cannot tell
+    /// you when to ask for it. `docs/ocr-dpi-sweep.md` has the whole table,
+    /// including the control proving the gate can fire at all.
     pub retry_when_unsure: bool,
 }
 
@@ -102,7 +129,10 @@ impl ScanOptions {
             fix_skew: false,
             confidence_floor: 0.5,
             // Nothing to retry *with*: the corrections that a retry turns off
-            // are already off.
+            // are already off. A rendered page could in principle be retried at
+            // a higher dpi instead — that was measured and declined, because
+            // the gate fires on no page this engine has ever been shown. See
+            // `retry_when_unsure`.
             retry_when_unsure: false,
         }
     }
