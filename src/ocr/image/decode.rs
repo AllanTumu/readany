@@ -61,7 +61,21 @@ pub type GrayImage = image::GrayImage;
 /// the answer is a **runtime** property, not a compile-time one: the same
 /// Android build decodes HEIC on API 28 and cannot on API 26. Without it, "this
 /// phone is too old" and "this photograph is corrupt" arrive as the same error.
-pub trait DecodeImage {
+/// ## `Send + Sync`, and why the bound is on the trait rather than on a caller
+///
+/// An [`crate::ocr::Engine`] owns its decoder, so an `Engine` is `Send` only if
+/// its decoder is. Without that, an engine cannot be put in a `static` — and a
+/// phone has exactly one set of loaded models for the whole process, opened
+/// once at startup and shared by every read, because loading them costs 450 ms
+/// on the cheapest Android this project has measured.
+///
+/// Requiring it here rather than at that one call site is the honest place for
+/// it: a platform decoder is a handle to ImageIO or to `BitmapFactory`, both of
+/// which are thread-safe, and an implementation that genuinely is not could not
+/// be used from an engine on any thread but the one that built it. No
+/// implementation in this repository or its siblings is affected — they are all
+/// unit structs.
+pub trait DecodeImage: Send + Sync {
     /// Can this decoder open these bytes?
     ///
     /// Read the bytes, not a file name. Implementations should answer from the

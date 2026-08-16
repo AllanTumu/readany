@@ -379,16 +379,41 @@ fn read_image_page(bytes: &[u8], options: &Options) -> Result<Page> {
         Some(backend) => {
             let result = backend.read_image(bytes)?;
             let markdown = ocr::markdown::to_markdown(&result, &ocr::MarkdownOptions::default());
+            let human_regions: Vec<_> = result.human_regions().into_iter().map(|(_, r)| *r).collect();
+            // A recogniser that ran and came back with nothing did **not**
+            // read this page, and calling it `Origin::Ocr` would take it out
+            // of `unresolved_pages` — the one field this crate's "named, never
+            // dropped" rule is made of. An empty read would then reach a
+            // caller as a page that was read and happened to be empty, which
+            // is a partial read wearing a complete one's clothes.
+            //
+            // This is not a hypothetical. Attaching a backend to a build that
+            // had none silently moved every unreadable image from
+            // `unresolved_pages` to `ocr_pages`, because every image gets a
+            // `ScanResult` whether or not anything was in it.
+            //
+            // **A blank page lands here too, and that is the right side to err
+            // on.** Nothing in the pixels separates "this paper has no ink on
+            // it" from "this photograph defeated the detector", so the two
+            // arrive identically and the honest report is the one that says a
+            // page needed reading and did not get it. A caller that wants the
+            // other reading has `human_regions` and the page's own emptiness
+            // to reason from; a caller told the page was read has nothing.
+            let read_something = !markdown.trim().is_empty() || !human_regions.is_empty();
             Ok(Page {
                 number: 1,
                 markdown,
-                origin: Origin::Ocr,
-                confidence: Some(result.confidence()),
-                human_regions: result
-                    .human_regions()
-                    .into_iter()
-                    .map(|(_, r)| *r)
-                    .collect(),
+                origin: if read_something {
+                    Origin::Ocr
+                } else {
+                    Origin::Unresolved
+                },
+                // `None` when nothing was read: `ScanResult::confidence`
+                // answers 0.0 for a page with no boxes, and 0.0 is a number a
+                // caller can render as "read, very badly" rather than as "not
+                // read". The absence is the truth.
+                confidence: read_something.then(|| result.confidence()),
+                human_regions,
             })
         }
         None => Ok(Page {
@@ -486,6 +511,60 @@ mod tests {
         assert!(doc.is_complete());
         assert_eq!(doc.pages[0].origin, Origin::Ocr);
         assert!(doc.pages[0].confidence.unwrap() > 0.8);
+    }
+
+    /// A recogniser that ran and found nothing at all. The commonest real
+    /// shapes: a photograph too dark to detect a box in, and a blank sheet.
+    struct OcrThatReadNothing;
+    impl OcrBackend for OcrThatReadNothing {
+        fn read_image(&self, _bytes: &[u8]) -> ocr::Result<ScanResult> {
+            Ok(ScanResult {
+                lines: Vec::new(),
+                width: 200,
+                height: 100,
+                rotation: 0,
+                skew: 0.0,
+                processing_time_ms: 1,
+                prepare_ms: 0,
+                detect_ms: 1,
+                recognize_ms: 0,
+            })
+        }
+    }
+
+    /// **A recogniser that read nothing has not read the page.**
+    ///
+    /// Attaching a backend must not be able to *empty* `unresolved_pages`,
+    /// which is the field the whole "named, never dropped" rule is made of.
+    /// Before this, every image handed to a backend came back `Origin::Ocr`
+    /// whatever the backend said, so a build that gained OCR silently turned
+    /// every unreadable photograph into a page that was read and happened to
+    /// contain nothing — complete, confident to three decimal places at 0.000,
+    /// and invisible.
+    ///
+    /// **Falsifying mutation**, performed: in `read_image_page`, replace
+    /// `if read_something { Origin::Ocr } else { Origin::Unresolved }` with
+    /// `Origin::Ocr`. `unresolved_pages` becomes empty, `ocr_pages` becomes
+    /// `[1]`, `is_complete()` becomes true and this test fails on the first
+    /// assertion.
+    #[test]
+    fn an_ocr_backend_that_read_nothing_leaves_the_page_named() {
+        let backend = OcrThatReadNothing;
+        let doc = read_with(
+            &png(),
+            &Options {
+                ocr: Some(&backend),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(doc.unresolved_pages, vec![1], "the page must stay named");
+        assert!(doc.ocr_pages.is_empty(), "nothing was recognised");
+        assert!(!doc.is_complete());
+        assert_eq!(doc.pages[0].origin, Origin::Unresolved);
+        // Not `Some(0.0)`. A caller can render 0.0 as "read, very badly"; the
+        // absence is the only value that cannot be mistaken for a reading.
+        assert_eq!(doc.pages[0].confidence, None);
     }
 
     #[test]
