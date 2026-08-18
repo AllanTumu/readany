@@ -13,6 +13,11 @@ use crate::ocr::types::{TextBox, TextLine};
 /// least this fraction of the shorter box.
 const LINE_OVERLAP: f32 = 0.5;
 
+/// Centres may differ by at most this fraction of the shorter box height.
+/// A detector box stretched across two receipt rows otherwise overlaps both
+/// and becomes a bridge that collapses the rows into one.
+const LINE_CENTRE_DISTANCE: f32 = 0.75;
+
 /// A gutter must be at least this fraction of the page wide to count.
 const MIN_GUTTER: f32 = 0.04;
 
@@ -78,7 +83,8 @@ fn overlaps(a: &TextBox, b: &TextBox) -> bool {
     let bottom = (ay + ah).min(by + bh);
     let shared = (bottom - top).max(0.0);
     let shorter = ah.min(bh).max(1.0);
-    shared / shorter >= LINE_OVERLAP
+    let centres_apart = (a.quad.center_y() - b.quad.center_y()).abs();
+    shared / shorter >= LINE_OVERLAP && centres_apart / shorter <= LINE_CENTRE_DISTANCE
 }
 
 /// Split boxes into columns at every vertical band no box crosses.
@@ -236,6 +242,20 @@ mod tests {
             tb("two", 10.0, 40.0, 40.0, 12.0),
         ]);
         assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn a_tall_detection_box_does_not_bridge_two_receipt_rows() {
+        let lines = group_into_lines(vec![
+            // The detector read the first description from one crop whose
+            // height reaches into the following row.
+            tb("1 CORN", 10.0, 10.0, 80.0, 30.0),
+            tb("2,20", 160.0, 10.0, 35.0, 12.0),
+            tb("1 B.LOLOT", 10.0, 29.0, 90.0, 12.0),
+            tb("2,30", 160.0, 29.0, 35.0, 12.0),
+        ]);
+
+        assert_eq!(texts(&lines), vec!["1 CORN 2,20", "1 B.LOLOT 2,30"]);
     }
 
     #[test]
