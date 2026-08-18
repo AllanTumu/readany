@@ -1,6 +1,6 @@
 {
   "name": "readany",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Route and read documents into clean Markdown — Word, Excel, PowerPoint, OpenDocument, RTF, EPUB, CSV and text-layer PDF. Names the pages it could not read instead of dropping them silently. Text recognition is not included: it needs a native runtime.",
   "license": "MIT",
   "author": "Allan Tumuhimbise",

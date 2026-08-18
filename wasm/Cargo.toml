@@ -4,7 +4,7 @@ name = "readany-wasm"
 # compile time, so a mismatch is a build failure rather than a wrong number on
 # a published package. `scripts/version.sh` stamps the npm manifests from the
 # same source.
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 description = "WebAssembly bindings for readany: read any document into clean Markdown"

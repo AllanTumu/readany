@@ -1,3 +1,17 @@
+## [0.2.1] - 2026-08-19
+
+### Fixed
+
+- **A tall detection box no longer bridges two receipt rows.** A detector crop
+  whose height reached into the row beneath it overlapped both and merged them,
+  so two printed lines became one carrying a single amount and the other row was
+  lost entirely. Overlap alone cannot tell that case from one row detected
+  twice, so the boxes' centres must also be close — at most 0.75 of the shorter
+  box's height.
+
+  Found on a real supermarket receipt where `1 CORN…` and `1 30 B.ESCU…` were
+  read as one line.
+
 # Changelog
 
 ## 0.2.0 — 10 August 2026
